@@ -1,0 +1,14 @@
+[Unit]
+Description=Journal Remote Logstash Upload Service
+After=network.target
+ 
+[Service]
+EnvironmentFile=/etc/sysconfig/journal2lumberjack
+Type=simple
+ExecStart=/usr/libexec/journal2lumberjack --host ${DESTINATION_HOST} --cafile ${DESTINATION_CAFILE}
+PrivateTmp=yes
+LimitNOFILE=16384
+Restart=on-failure
+ 
+[Install]
+WantedBy=multi-user.target
