@@ -30,6 +30,7 @@
 #include <systemd/sd-journal.h>
 #include <zlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <inotifytools/inotifytools.h>
@@ -45,10 +46,11 @@ static int help_flag;
 
 void
 usage() {
-  fprintf(stderr, "Usage: journal2lumberjack [--stateless] --host <lumberjack host:port> --cafile <lumbjerjack CA>\n");
+  fprintf(stderr, "Usage: journal2lumberjack [--stateless] --host <lumberjack host:port> --cafile <lumberjack CA>\n");
 }
 
 #define STREAM_BUFFER_SIZE 1048576
+#define DATE_BUFFER_SIZE 100
 
 struct iobuf {
   uint8_t *inbuf;
@@ -225,10 +227,36 @@ read_lumberjack_ack(struct iobuf *iobuf_p) {
 }
 
 void
-write_lumbjerjack_string(struct iobuf *iobuf_p, const char *string) {
+write_lumberjack_string(struct iobuf *iobuf_p, const char *string) {
   size_t l = strlen(string);
   write_network_long_to_iobuf(iobuf_p, l);
   write_buf_to_iobuf(iobuf_p, (const uint8_t *)string, l);
+}
+
+void
+write_rfc3339_date_to_iobuf(struct iobuf *iobuf_p, uint64_t realtime_timestamp_usec) {
+  char realtime_timestamp_rfc3339_a[DATE_BUFFER_SIZE];
+  realtime_timestamp_rfc3339_a[DATE_BUFFER_SIZE-1] = '\0';
+  char realtime_timestamp_rfc3339_b[DATE_BUFFER_SIZE];
+  realtime_timestamp_rfc3339_b[DATE_BUFFER_SIZE-1] = '\0';
+
+  time_t realtime_timestamp_time_t = realtime_timestamp_usec / 1000000;
+
+  struct tm realtime_timestamp_tm;
+  gmtime_r(&realtime_timestamp_time_t, &realtime_timestamp_tm);
+
+  strftime(realtime_timestamp_rfc3339_a, DATE_BUFFER_SIZE-1, "%FT%T", &realtime_timestamp_tm);
+  snprintf(realtime_timestamp_rfc3339_b, DATE_BUFFER_SIZE-1, ".%03u", (int)(realtime_timestamp_usec % 1000000) / 1000);
+
+  size_t realtime_timestamp_rfc3339_a_len = strlen(realtime_timestamp_rfc3339_a);
+  size_t realtime_timestamp_rfc3339_b_len = strlen(realtime_timestamp_rfc3339_b);
+
+  //fprintf(stderr, "%s%sZ\n", realtime_timestamp_rfc3339_a, realtime_timestamp_rfc3339_b);
+
+  write_network_long_to_iobuf(iobuf_p, realtime_timestamp_rfc3339_a_len + realtime_timestamp_rfc3339_b_len + 1);
+  write_buf_to_iobuf(iobuf_p, (uint8_t *)realtime_timestamp_rfc3339_a, realtime_timestamp_rfc3339_a_len);
+  write_buf_to_iobuf(iobuf_p, (uint8_t *)realtime_timestamp_rfc3339_b, realtime_timestamp_rfc3339_b_len);
+  write_buf_to_iobuf(iobuf_p, (uint8_t *)"Z", 1);
 }
 
 void
@@ -415,15 +443,6 @@ main(int argc, char **argv)
 
   uint32_t sent_sequence_number = 0;
 
-  char timestamp_rfc3339_a[100];
-  timestamp_rfc3339_a[99] = '\0';
-  char timestamp_rfc3339_b[100];
-  timestamp_rfc3339_b[99] = '\0';
-
-  char timestamp_msec[100];
-  timestamp_msec[99] = '\0';
-
-
   if (inotifytools_initialize() == 0)
     fprintf(stderr, "%s\n", strerror( inotifytools_error()));
 
@@ -456,7 +475,7 @@ main(int argc, char **argv)
 
   int persistent_update = 0;
 
-  time_t last_persistent_update = 0;
+  uint64_t last_persistent_update = 0;
 
   int cont = 1;
 
@@ -465,31 +484,6 @@ main(int argc, char **argv)
 
     if (sd_journal_next(journal) > 0) {
       reached_end = 0;
-
-      uint64_t timestamp_usec;
-      int res = sd_journal_get_realtime_usec(journal, &timestamp_usec);
-      if (res) abort();
-
-      time_t timestamp_time_t = timestamp_usec / 1000000;
-
-      time_t truncated_time = timestamp_time_t & ~(time_t)0xff;
-      if (truncated_time > last_persistent_update) {
-	last_persistent_update = truncated_time;
-	persistent_update = 1;
-      }
-
-      struct tm timestamp_tm;
-      gmtime_r(&timestamp_time_t, &timestamp_tm);
-
-      strftime(timestamp_rfc3339_a, 99, "%FT%T", &timestamp_tm);
-      snprintf(timestamp_rfc3339_b, 99, ".%03u", (int)(timestamp_usec % 1000000) / 1000);
-
-      size_t timestamp_rfc3339_a_len = strlen(timestamp_rfc3339_a);
-      size_t timestamp_rfc3339_b_len = strlen(timestamp_rfc3339_b);
-
-      snprintf(timestamp_msec, 99, "%ld", (long)(timestamp_usec / 1000));
-
-      //fprintf(stderr, "%s%sZ\n", timestamp_rfc3339_a, timestamp_rfc3339_b);
 
       const void *data;
       size_t length;
@@ -505,42 +499,92 @@ main(int argc, char **argv)
 
       // send key + value
       num_fields++;
-      write_lumbjerjack_string(&iobuf, "type");
-      write_lumbjerjack_string(&iobuf, "journal");
+      write_lumberjack_string(&iobuf, "type");
+      write_lumberjack_string(&iobuf, "journal");
+
+      // __REALTIME_TIMESTAMP -> rfc -> timestamp
+
+      uint64_t journal_realtime_timestamp_usec;
+      int res = sd_journal_get_realtime_usec(journal, &journal_realtime_timestamp_usec);
+      if (res) abort();
+
+      uint64_t truncated_time = journal_realtime_timestamp_usec & ~(time_t)0xfffffff;
+      if (truncated_time > last_persistent_update) {
+	// About every five minutes of records.
+	last_persistent_update = truncated_time;
+	persistent_update = 1;
+      }
 
       // send key
       num_fields++;
-      write_lumbjerjack_string(&iobuf, "timestamp");
+      write_lumberjack_string(&iobuf, "timestamp");
+
       // send value
-      write_network_long_to_iobuf(&iobuf, timestamp_rfc3339_a_len + timestamp_rfc3339_b_len + 1);
-      write_buf_to_iobuf(&iobuf, (uint8_t *)timestamp_rfc3339_a, timestamp_rfc3339_a_len);
-      write_buf_to_iobuf(&iobuf, (uint8_t *)timestamp_rfc3339_b, timestamp_rfc3339_b_len);
-      write_buf_to_iobuf(&iobuf, (uint8_t *)"Z", 1);
+      write_rfc3339_date_to_iobuf(&iobuf, journal_realtime_timestamp_usec);
+
+      // __REALTIME_TIMESTAMP -> journal_realtime_timestamp
 
       // send key + value
       num_fields++;
-      write_lumbjerjack_string(&iobuf, "__REALTIME_TIMESTAMP");
-      write_lumbjerjack_string(&iobuf, timestamp_msec);
+      write_lumberjack_string(&iobuf, "journal_realtime_timestamp");
+      char journal_realtime_timestamp_msec[DATE_BUFFER_SIZE];
+      journal_realtime_timestamp_msec[DATE_BUFFER_SIZE-1] = '\0';
+      snprintf(journal_realtime_timestamp_msec, DATE_BUFFER_SIZE-1, "%ld", (long)(journal_realtime_timestamp_usec));
+      write_lumberjack_string(&iobuf, journal_realtime_timestamp_msec);
 
       SD_JOURNAL_FOREACH_DATA(journal, data, length) {
-	num_fields++;
+	const char *keyvalue = (char *)data;
 
 	// separate the key and value
-	const char *separator = strchr(data, '=');
+	const char *separator = strchr(keyvalue, '=');
 	if (!separator) abort();
-	size_t key_length = ((const void *)separator) - data;
+	size_t key_length = separator - keyvalue;
 
 	const char *value = &(separator[1]);
 	size_t value_length = length - key_length - 1;
 
+	// _SOURCE_REALTIME_TIMESTAMP -> rfc -> source_timestamp
+
+	if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
+	  // send key
+	  num_fields++;
+	  write_lumberjack_string(&iobuf, "source_timestamp");
+	  // send value
+	  uint64_t source_timestamp_usec = (uint64_t)atoll(value);
+	  write_rfc3339_date_to_iobuf(&iobuf, source_timestamp_usec);
+	}
+
+	// MESSAGE -> line
+	// _HOSTNAME -> host
+	// _SOURCE_REALTIME_TIMESTAMP -> source_realtime_timestamp
+	// __(.*) -> lowercase -> journal_\1
+	// _(.*) -> lowercase -> \1
+	// (.*) -> \1
+
 	// send key
-	if (strncmp(data, "MESSAGE=", 8) == 0) {
-	  write_lumbjerjack_string(&iobuf, "line");
-	} else if (strncmp(data, "_HOSTNAME=", 10) == 0) {
-	  write_lumbjerjack_string(&iobuf, "host");
+	num_fields++;
+	if (strncmp(keyvalue, "MESSAGE=", 8) == 0) {
+	  write_lumberjack_string(&iobuf, "line");
+	} else if (strncmp(keyvalue, "_HOSTNAME=", 10) == 0) {
+	  write_lumberjack_string(&iobuf, "host");
+	} else if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
+	  write_lumberjack_string(&iobuf, "source_realtime_timestamp");
+	} else if (strncmp(keyvalue, "_", 1) == 0) {
+	  if (strncmp(keyvalue, "__", 2) == 0) {
+	    // __FOO -> journal_foo
+	    write_network_long_to_iobuf(&iobuf, key_length - 1 + 7);
+	    write_buf_to_iobuf(&iobuf, (uint8_t *)"journal", 7);
+	  } else {
+	    // _FOO -> foo
+	    write_network_long_to_iobuf(&iobuf, key_length - 1);
+	  }
+	  for (size_t i=1; i<key_length; i++) {
+	    uint8_t lowercase = (uint8_t)tolower(keyvalue[i]);
+	    write_buf_to_iobuf(&iobuf, &lowercase, 1);
+	  }
 	} else {
 	  write_network_long_to_iobuf(&iobuf, key_length);
-	  write_buf_to_iobuf(&iobuf, data, key_length);
+	  write_buf_to_iobuf(&iobuf, (uint8_t *)keyvalue, key_length);
 	}
 
 	// send value
