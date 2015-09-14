@@ -19,7 +19,6 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
-#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -36,30 +35,38 @@
 #include <inotifytools/inotifytools.h>
 #include <inotifytools/inotify.h>
 
-#define min(a,b)				\
-  ({ __typeof__ (a) _a = (a);			\
-    __typeof__ (b) _b = (b);			\
-    _a < _b ? _a : _b; })
+// NSS
+#include <prerror.h>
+#include <prinit.h>
+#include <nss.h>
+#include <pk11pub.h>
+#include <secmod.h>
+#include <ssl.h>
+#include <sslproto.h>
+NSPR_API(PRFileDesc*) PR_ImportTCPSocket(int);
+
+#define min(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
+#define max(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a > _b ? _a : _b; })
 
 static int verbose_flag;
 static int help_flag;
 
 void
 usage() {
-  fprintf(stderr, "Usage: journal2lumberjack [--stateless] --host <lumberjack host:port> --cafile <lumberjack CA>\n");
+  fprintf(stderr, "Usage: journal2lumberjack [--stateless] --host <lumberjack host> --port <port> --certdb <lumberjack CA>\n");
 }
 
 #define STREAM_BUFFER_SIZE 1048576
 #define DATE_BUFFER_SIZE 100
 
 struct iobuf {
+  PRFileDesc* nsprconn;
   uint8_t *inbuf;
   uint8_t *outbuf;
   size_t inbuf_start; // first used byte
   size_t inbuf_consumed, outbuf_consumed; // first free byte
   size_t inbuf_size, outbuf_size;
   int outbuf_data_queue;
-  int in, out;
 };
 
 // Returns true if there are at least this much available to read,
@@ -67,7 +74,8 @@ struct iobuf {
 int
 poll_iobuf(struct iobuf *iobuf_p, size_t bytes) {
   if ( (iobuf_p->inbuf_consumed - iobuf_p->inbuf_start) < bytes ) {
-    ssize_t count = read(iobuf_p->in, (void *)(&iobuf_p->inbuf[iobuf_p->inbuf_consumed]), iobuf_p->inbuf_size - iobuf_p->inbuf_consumed);
+    size_t free_buffer_space = min(iobuf_p->inbuf_size - iobuf_p->inbuf_consumed, (size_t)PR_INT32_MAX);
+    PRInt32 count = PR_Read(iobuf_p->nsprconn, (void *)(&iobuf_p->inbuf[iobuf_p->inbuf_consumed]), (PRInt32)free_buffer_space);
     if (count <= 0) {
       if (errno != EAGAIN && errno != EWOULDBLOCK) {
 	abort();
@@ -98,7 +106,8 @@ read_buf_from_iobuf(struct iobuf *iobuf_p, const uint8_t *buf, size_t size) {
   }
 
   while (has_read < to_read) {
-    ssize_t count = read(iobuf_p->in, (void *)(&buf[has_read]), to_read - has_read);
+    size_t left_to_read =  min(to_read - has_read, (size_t)PR_INT32_MAX);
+    PRInt32 count = PR_Read(iobuf_p->nsprconn, (void *)(&buf[has_read]), (PRInt32)left_to_read);
     if (count < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
 	continue;
@@ -148,7 +157,8 @@ lumberjack_package_frames(struct iobuf *iobuf_p) {
   size_t written = 0, to_write = iobuf_p->outbuf_consumed;
 
   while (written < to_write) {
-    ssize_t count = write(iobuf_p->out, &(iobuf_p->outbuf[written]), to_write - written);
+    size_t left_to_write = min(to_write - written, (size_t)PR_INT32_MAX);
+    PRInt32 count = PR_Write(iobuf_p->nsprconn, &(iobuf_p->outbuf[written]), (PRInt32)left_to_write);
     if (count < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
 	continue;
@@ -323,6 +333,179 @@ watch_journal_paths() {
   return persistent;
 }
 
+#define HAPPY_STATE_NONE 0
+#define HAPPY_STATE_CONNECTING 1
+#define HAPPY_STATE_CONNECTED 2
+#define HAPPY_STATE_RETURNED 3
+#define HAPPY_STATE_FAILED -1
+
+struct happy_socket {
+  struct addrinfo *addr;
+  int fd;
+  int state;
+};
+
+struct happy_eyeballs {
+  struct addrinfo *server_addresses;
+  int num_addr;
+  struct happy_socket *sockets;
+};
+
+void
+happy_eyeballs_lookup(struct happy_eyeballs **state_p, const char *host, const char *port) {
+  struct happy_eyeballs *state = calloc(1, sizeof(struct happy_eyeballs));
+  if (state == NULL) abort();
+
+  // Happy eyeballs connect.
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_ADDRCONFIG;
+  int res = getaddrinfo(host, port, &hints, &(state->server_addresses));
+  if (res) abort();
+
+  // count results
+  int results = 0;
+  for (struct addrinfo *address = state->server_addresses; address != NULL; address = address->ai_next) {
+    results++;
+  }
+  state->num_addr = results;
+
+  struct addrinfo **addresses = calloc(state->num_addr, sizeof(struct addrinfo *));
+  if (addresses == NULL) abort();
+
+  int *ai_families = calloc(state->num_addr, sizeof(int));
+  int addri = 0, num_fam = 0;
+  for (struct addrinfo *address = state->server_addresses; address != NULL; address = address->ai_next) {
+    addresses[addri++] = address;
+
+    // Collect the set of ai_family
+    for (int fami=0; fami<state->num_addr; fami++) {
+      if (ai_families[fami] == address->ai_family) {
+	break;
+      } else if (ai_families[fami] == 0) {
+	ai_families[fami] = address->ai_family;
+	num_fam = fami+1;
+	break;
+      }
+    }
+  }
+
+  state->sockets = (struct happy_socket *)calloc(state->num_addr, sizeof(struct happy_socket));
+  if (state->sockets == NULL) abort();
+
+  int order = 0, found = 1;
+  while (found) {
+    found = 0;
+    for (int fami=0; fami<num_fam; fami++) {
+      for (int i=0; i<state->num_addr; i++) {
+	if (addresses[i] != NULL && addresses[i]->ai_family == ai_families[fami]) {
+	  state->sockets[order++].addr = addresses[i];
+	  addresses[i] = NULL;
+	  found = 1;
+	  break;
+	}
+      }
+    }
+  }
+
+  if (state->num_addr != order) abort();
+
+  free(ai_families);
+
+  *state_p = state;
+}
+
+int
+happy_eyeballs_connect(struct happy_eyeballs *state) {
+  for (int i=0; i<state->num_addr; i++) {
+    if (state->sockets[i].state == HAPPY_STATE_NONE) {
+      // Try this one.
+      struct addrinfo *address = state->sockets[i].addr;
+      int new_socket = socket(address->ai_family, SOCK_STREAM, 0);
+      if (new_socket > 0) {
+	state->sockets[i].fd = new_socket;
+	int res = connect(new_socket, address->ai_addr, address->ai_addrlen);
+	if (res == EINPROGRESS) {
+	  state->sockets[i].state = HAPPY_STATE_CONNECTING;
+	  break;
+	} else if (res == 0) {
+	  state->sockets[i].state = HAPPY_STATE_CONNECTED;
+	  break;
+	} else if (res == 0) {
+	  state->sockets[i].state = HAPPY_STATE_FAILED;
+	}
+      } else {
+	state->sockets[i].state = HAPPY_STATE_FAILED;
+      }
+    }
+  }
+
+  fd_set waiting_fds;
+  FD_ZERO(&waiting_fds);
+
+  struct timeval wait;
+  wait.tv_sec = 0;
+  wait.tv_usec = 300000;
+
+  int nfds = 0;
+  for (int i=0; i<state->num_addr; i++) {
+    if (state->sockets[i].state == HAPPY_STATE_CONNECTING) {
+      FD_SET(state->sockets[i].fd, &waiting_fds);
+      nfds = max(state->sockets[i].fd + 1, nfds);
+    }
+  }
+  if (nfds) {
+    int ret = select(nfds, NULL, &waiting_fds, NULL, &wait);
+    if (ret == -1 && ret != EINTR) abort();
+
+    for (int i=0; i<state->num_addr; i++) {
+      if (FD_ISSET(state->sockets[i].fd, &waiting_fds)) {
+	int val;
+	socklen_t size = sizeof(val);
+	if (getsockopt(state->sockets[i].fd, SOL_SOCKET, SO_ERROR, &val, &size) == 0 && val != SO_ERROR) {
+	  state->sockets[i].state = HAPPY_STATE_CONNECTED;
+	} else {
+	  state->sockets[i].state = HAPPY_STATE_FAILED;
+	}
+      }
+    }
+  }
+
+  int not_failed = 0;
+  for (int i=0; i<state->num_addr; i++) {
+    // Do we have a connected socket now?
+    if (state->sockets[i].state == HAPPY_STATE_CONNECTED) {
+      state->sockets[i].state = HAPPY_STATE_RETURNED;
+      return state->sockets[i].fd;
+    }
+
+    // If not, do we have something that might connect in the future?
+    if (state->sockets[i].state != HAPPY_STATE_RETURNED && state->sockets[i].state != HAPPY_STATE_FAILED) {
+      not_failed = 1;
+    }
+  }
+
+  if (not_failed)
+    return 0;
+
+  // the end
+  return -1;
+}
+
+void
+happy_eyeballs_close(struct happy_eyeballs *state) {
+  for (int i=0; i<state->num_addr; i++) {
+    if (state->sockets[i].state != HAPPY_STATE_NONE && state->sockets[i].state != HAPPY_STATE_RETURNED) {
+      close(state->sockets[i].fd);
+    }
+  }
+  free(state->sockets);
+  freeaddrinfo(state->server_addresses);
+  free(state);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -331,7 +514,8 @@ main(int argc, char **argv)
 
   int stateless = 0;
   char *host = NULL;
-  char *cafile = NULL;
+  char *port = NULL;
+  char *certdb = NULL;
 
   int c;
 
@@ -341,13 +525,14 @@ main(int argc, char **argv)
 	{"verbose", no_argument, &verbose_flag, 1},
 	{"stateless", no_argument, 0, 0},
 	{"host",      required_argument, 0, 0},
-	{"cafile",    required_argument, 0, 0},
+	{"port",      required_argument, 0, 0},
+	{"certdb",    required_argument, 0, 0},
 	{"help", no_argument, &help_flag, 1},
 	{0, 0, 0, 0}
       };
     int option_index = 0;
 
-    c = getopt_long (argc, argv, "s:H:C:h",
+    c = getopt_long (argc, argv, "s:H:P:C:h",
 		     long_options, &option_index);
 
     if (c == -1)
@@ -363,7 +548,9 @@ main(int argc, char **argv)
 	if (option_index == 2)
 	  host = strdup(optarg);
 	if (option_index == 3)
-	  cafile = strdup(optarg);
+	  port = strdup(optarg);
+	if (option_index == 4)
+	  certdb = strdup(optarg);
 	break;
 
       case 's':
@@ -374,8 +561,12 @@ main(int argc, char **argv)
 	host = strdup(optarg);
 	break;
 
+      case 'P':
+	host = strdup(optarg);
+	break;
+
       case 'C':
-	cafile = strdup(optarg);
+	certdb = strdup(optarg);
 	break;
 
       case 'h':
@@ -396,42 +587,133 @@ main(int argc, char **argv)
     abort();
   }
 
-  if (help_flag || host == NULL || cafile == NULL) {
+  if (help_flag || host == NULL || port == NULL || certdb == NULL) {
     usage();
     exit(0);
   }
 
-  char *sslstring = NULL;
-  if(asprintf(&sslstring, "SSL:%s,cafile=%s,verify=0", host, cafile) <= 0) abort();
+  // Initialize NSS library.
+  //  https://docs.fedoraproject.org/en-US/Fedora_Security_Team/1/html/Defensive_Coding/sect-Defensive_Coding-TLS-Client-NSS.html
 
-  int tocat[2], fromcat[2];
+  PR_Init(PR_USER_THREAD, PR_PRIORITY_NORMAL, 0);
+  NSSInitContext *const ctx = NSS_InitContext(certdb, "", "", "", NULL, NSS_INIT_READONLY | NSS_INIT_PK11RELOAD);
 
-  if (pipe2(tocat, 0)) abort();
-  if (pipe2(fromcat, 0)) abort();
-
-  // Using socat for SSL is stupid but it works.
-
-  int cpid = fork();
-  if (cpid == -1) abort();
-
-  if (cpid == 0) {
-    // socat here
-    close(tocat[1]);
-    close(fromcat[0]);
-    dup2(tocat[0],0); // socat stdin
-    close(tocat[0]);
-    dup2(fromcat[1],1); // socat stdout
-    close(fromcat[1]);
-    execl("/usr/bin/socat", "socat", "-", sslstring, NULL);
+  if (ctx == NULL) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
     abort();
   }
 
-  close(tocat[0]);
-  close(fromcat[1]);
+  // Ciphers to enable.
+  static const PRUint16 good_ciphers[] = {
+    TLS_RSA_WITH_AES_128_CBC_SHA,
+    TLS_RSA_WITH_AES_256_CBC_SHA,
+    SSL_RSA_WITH_3DES_EDE_CBC_SHA,
+    SSL_NULL_WITH_NULL_NULL // sentinel
+  };
+
+  // Check if the current policy allows any strong ciphers.  If it
+  // doesn't, set the cipher suite policy.  This is not thread-safe
+  // and has global impact.  Consequently, we only do it if absolutely
+  // necessary.
+  int found_good_cipher = 0;
+  for (const PRUint16 *p = good_ciphers; *p != SSL_NULL_WITH_NULL_NULL; ++p) {
+    PRInt32 policy;
+    if (SSL_CipherPolicyGet(*p, &policy) != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: policy for cipher %u: error %d: %s\n", (unsigned)*p, err, PR_ErrorToName(err));
+      abort();
+    }
+    if (policy == SSL_ALLOWED) {
+      //fprintf(stderr, "info: found cipher %x\n", (unsigned)*p);
+      found_good_cipher = 1;
+      break;
+    }
+  }
+  if (!found_good_cipher) {
+    if (NSS_SetDomesticPolicy() != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: NSS_SetDomesticPolicy: error %d: %s\n", err, PR_ErrorToName(err));
+      abort();
+    }
+  }
+
+  // Initialize the trusted certificate store.
+  char module_name[] = "library=libnssckbi.so name=\"Root Certs\"";
+  SECMODModule *module = SECMOD_LoadUserModule(module_name, NULL, PR_FALSE);
+  if (module == NULL || !module->loaded) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
+    abort();
+  }
+
+  struct happy_eyeballs *state = NULL;
+  happy_eyeballs_lookup(&state, host, port);
+
+  int sockfd;
+  do {
+    sockfd = happy_eyeballs_connect(state);
+  } while (sockfd == 0);
+
+  PRFileDesc* nspr = PR_ImportTCPSocket(sockfd);
+  sockfd = -1;
+
+  {
+    PRFileDesc *model = PR_NewTCPSocket();
+    PRFileDesc *newfd = SSL_ImportFD(NULL, model);
+    if (newfd == NULL) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
+      abort();
+    }
+    model = newfd;
+    newfd = NULL;
+    if (SSL_OptionSet(model, SSL_ENABLE_SSL2, PR_FALSE) != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: set SSL_ENABLE_SSL2 to false error %d: %s\n", err, PR_ErrorToName(err));
+      abort();
+    }
+    if (SSL_OptionSet(model, SSL_V2_COMPATIBLE_HELLO, PR_FALSE) != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: set SSL_V2_COMPATIBLE_HELLO to false error %d: %s\n", err, PR_ErrorToName(err));
+      abort();
+    }
+    if (SSL_OptionSet(model, SSL_ENABLE_DEFLATE, PR_FALSE) != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: set SSL_ENABLE_DEFLATE to false error %d: %s\n", err, PR_ErrorToName(err));
+      abort();
+    }
+
+    newfd = SSL_ImportFD(model, nspr);
+    if (newfd == NULL) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: SSL_ImportFD error %d: %s\n", err, PR_ErrorToName(err));
+      abort();
+    }
+    nspr = newfd;
+    PR_Close(model);
+  }
+
+  if (SSL_ResetHandshake(nspr, PR_FALSE) != SECSuccess) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: SSL_ResetHandshake error %d: %s\n", err, PR_ErrorToName(err));
+    abort();
+  }
+  if (SSL_SetURL(nspr, host) != SECSuccess) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: SSL_SetURL error %d: %s\n", err, PR_ErrorToName(err));
+    abort();
+  }
+  if (SSL_ForceHandshake(nspr) != SECSuccess) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: SSL_ForceHandshake error %d: %s\n", err, PR_ErrorToName(err));
+    abort();
+  }
+
+  happy_eyeballs_close(state);
 
   struct iobuf iobuf;
-  iobuf.in = fromcat[0];
-  iobuf.out = tocat[1];
+  iobuf.nsprconn = nspr;
   iobuf.inbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
   iobuf.outbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
   iobuf.inbuf_size = STREAM_BUFFER_SIZE;
