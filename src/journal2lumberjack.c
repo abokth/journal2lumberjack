@@ -206,14 +206,19 @@ happy_eyeballs_connect(struct happy_eyeballs *state) {
       int new_socket = socket(address->ai_family, SOCK_STREAM | SOCK_NONBLOCK, 0);
       if (new_socket > 0) {
 	state->sockets[i].fd = new_socket;
-	int res = connect(new_socket, address->ai_addr, address->ai_addrlen);
-	if (res == EINPROGRESS) {
+
+	int res;
+	do {
+	  res = connect(new_socket, address->ai_addr, address->ai_addrlen);
+	} while (res == -1 && (errno == EAGAIN || errno == EINTR));
+
+	if (res == -1 && errno == EINPROGRESS) {
 	  state->sockets[i].state = HAPPY_STATE_CONNECTING;
 	  break;
 	} else if (res == 0) {
 	  state->sockets[i].state = HAPPY_STATE_CONNECTED;
 	  break;
-	} else if (res == 0) {
+	} else {
 	  state->sockets[i].state = HAPPY_STATE_FAILED;
 	}
       } else {
