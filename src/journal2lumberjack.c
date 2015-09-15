@@ -298,13 +298,13 @@ load_cursor(const char *filename) {
   FILE *statefile = fopen(filename, "r");
   if (!statefile)
     return NULL;
-  if (statefile) {
-    char readbuf[1024];
-    readbuf[1023] = '\0';
-    if (fgets(readbuf, 1023, statefile) != NULL)
-      acked_cursor = strdup(readbuf);
-    fclose(statefile);
-  }
+  char *acked_cursor = NULL;
+  char readbuf[1024];
+  readbuf[1023] = '\0';
+  if (fgets(readbuf, 1023, statefile) != NULL)
+    acked_cursor = strdup(readbuf);
+  fclose(statefile);
+  return acked_cursor;
 }
 
 void
