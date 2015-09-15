@@ -203,7 +203,7 @@ happy_eyeballs_connect(struct happy_eyeballs *state) {
     if (state->sockets[i].state == HAPPY_STATE_NONE) {
       // Try this one.
       struct addrinfo *address = state->sockets[i].addr;
-      int new_socket = socket(address->ai_family, SOCK_STREAM, 0);
+      int new_socket = socket(address->ai_family, SOCK_STREAM | SOCK_NONBLOCK, 0);
       if (new_socket > 0) {
 	state->sockets[i].fd = new_socket;
 	int res = connect(new_socket, address->ai_addr, address->ai_addrlen);
