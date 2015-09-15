@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <error.h>
 #include <fcntl.h>
 #include <time.h>
 #include <arpa/inet.h>
@@ -57,9 +58,9 @@ usage() {
 }
 
 void
-__attribute__ ((noreturn)) errx(const char *error) {
-  fprintf(stderr, "Error: %s\n", error);
-  exit(3);
+__attribute__ ((noreturn)) errx(const char *description) {
+  error(3, 0, "Error: %s", description);
+  exit(3); // will never be reached
 }
 
 #define RUNTIME_CURSOR_FILE "/run/journal-export-acked-cursor"
@@ -82,7 +83,7 @@ load_cursor(const char *filename) {
 void
 save_cursor(const char *filename, const char *acked_cursor) {
   FILE *statefile = fopen(filename, "w");
-  if (statefile == NULL) errx("State file update failed.");
+  if (statefile == NULL) error(3, errno, "State file update failed.");
   fprintf(statefile, acked_cursor);
   fclose(statefile);
 }
@@ -149,7 +150,7 @@ happy_eyeballs_lookup(struct happy_eyeballs **state_p, const char *host, const c
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_ADDRCONFIG;
   int res = getaddrinfo(host, port, &hints, &(state->server_addresses));
-  if (res) errx("Host name lookup failure.");
+  if (res) error(3, 0, "Host name lookup failure.");
 
   // count results
   int results = 0;
@@ -249,7 +250,7 @@ happy_eyeballs_connect(struct happy_eyeballs *state) {
   }
   if (nfds) {
     int ret = select(nfds, NULL, &waiting_fds, NULL, &wait);
-    if (ret == -1 && ret != EINTR) errx("Error while waiting for connection.");
+    if (ret == -1 && ret != EINTR) error(3, errno, "Error while waiting for connection.");
 
     for (int i=0; i<state->num_addr; i++) {
       if (FD_ISSET(state->sockets[i].fd, &waiting_fds)) {
@@ -307,8 +308,7 @@ nspr_tls_init(const char *certdb) {
 
   if (ctx == NULL) {
     const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
-    errx("TLS error");
+    error(3, 0, "TLS error: NSPR error code %d: %s", err, PR_ErrorToName(err));
   }
 
   // Ciphers to enable.
@@ -328,8 +328,7 @@ nspr_tls_init(const char *certdb) {
     PRInt32 policy;
     if (SSL_CipherPolicyGet(*p, &policy) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
-      fprintf(stderr, "error: policy for cipher %u: error %d: %s\n", (unsigned)*p, err, PR_ErrorToName(err));
-      errx("TLS error");
+      error(3, 0, "TLS error: NSPR policy for cipher %u: error %d: %s", (unsigned)*p, err, PR_ErrorToName(err));
     }
     if (policy == SSL_ALLOWED) {
       //fprintf(stderr, "info: found cipher %x\n", (unsigned)*p);
@@ -340,8 +339,7 @@ nspr_tls_init(const char *certdb) {
   if (!found_good_cipher) {
     if (NSS_SetDomesticPolicy() != SECSuccess) {
       const PRErrorCode err = PR_GetError();
-      fprintf(stderr, "error: NSS_SetDomesticPolicy: error %d: %s\n", err, PR_ErrorToName(err));
-      errx("TLS error");
+      error(3, 0, "TLS/NSPR error: NSS_SetDomesticPolicy: error %d: %s", err, PR_ErrorToName(err));
     }
   }
 
@@ -350,8 +348,7 @@ nspr_tls_init(const char *certdb) {
   SECMODModule *module = SECMOD_LoadUserModule(module_name, NULL, PR_FALSE);
   if (module == NULL || !module->loaded) {
     const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
-    errx("TLS error");
+    error(3, 0, "TLS/NSPR error: NSPR error code %d: %s", err, PR_ErrorToName(err));
   }
 }
 
@@ -450,8 +447,7 @@ void
 nspr_tls_close(PRFileDesc* nsprconn) {
   if (PR_Shutdown(nsprconn, PR_SHUTDOWN_BOTH) != PR_SUCCESS) {
     const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: PR_Read error %d: %s\n", err, PR_ErrorToName(err));
-    errx("TLS error");
+    error(3, 0, "TLS/NSPR error: PR_Shutdown error %d: %s", err, PR_ErrorToName(err));
   }
   PR_Close(nsprconn);
 }
@@ -496,18 +492,14 @@ iobuf_close(struct iobuf *iobuf_p) {
   free(iobuf_p);
 }
 
-// Returns true if there are at least this much available to read,
-// this works with both blocking and non-blocking file descriptors.
 int
 poll_iobuf(struct iobuf *iobuf_p, size_t bytes) {
   if ( (iobuf_p->inbuf_consumed - iobuf_p->inbuf_start) < bytes ) {
     size_t free_buffer_space = min(iobuf_p->inbuf_size - iobuf_p->inbuf_consumed, (size_t)PR_INT32_MAX);
     PRInt32 count = PR_Read(iobuf_p->nsprconn, (void *)(&iobuf_p->inbuf[iobuf_p->inbuf_consumed]), (PRInt32)free_buffer_space);
     if (count <= 0) {
-      if (errno != EAGAIN && errno != EWOULDBLOCK) {
-	errx("TLS read error");
-      }
-      count = 0;
+      const PRErrorCode err = PR_GetError();
+      error(3, 0, "TLS read error: NSPR error code %d: %s", err, PR_ErrorToName(err));
     }
     iobuf_p->inbuf_consumed += count;
   }
@@ -535,13 +527,9 @@ read_buf_from_iobuf(struct iobuf *iobuf_p, const uint8_t *buf, size_t size) {
   while (has_read < to_read) {
     size_t left_to_read =  min(to_read - has_read, (size_t)PR_INT32_MAX);
     PRInt32 count = PR_Read(iobuf_p->nsprconn, (void *)(&buf[has_read]), (PRInt32)left_to_read);
-    if (count < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-	continue;
-      } else {
-	errx("TLS read error");
-      }
-      count = 0;
+    if (count <= 0) {
+      const PRErrorCode err = PR_GetError();
+      error(3, 0, "TLS read error: NSPR error code %d: %s", err, PR_ErrorToName(err));
     }
     has_read += count;
   }
@@ -587,12 +575,8 @@ lumberjack_package_frames(struct iobuf *iobuf_p) {
     size_t left_to_write = min(to_write - written, (size_t)PR_INT32_MAX);
     PRInt32 count = PR_Write(iobuf_p->nsprconn, &(iobuf_p->outbuf[written]), (PRInt32)left_to_write);
     if (count < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-	continue;
-      } else {
-	errx("TLS write error");
-      }
-      count = 0;
+      const PRErrorCode err = PR_GetError();
+      error(3, 0, "TLS write error: NSPR error code %d: %s", err, PR_ErrorToName(err));
     }
     written += count;
   }
@@ -1027,8 +1011,9 @@ main(int argc, char **argv)
 
   nspr_tls_init(certdb);
 
-  if (inotifytools_initialize() == 0)
-    fprintf(stderr, "%s\n", strerror( inotifytools_error()));
+  if (inotifytools_initialize() == 0) {
+    error(3, 0, "%s", strerror(inotifytools_error()));
+  }
 
   open_and_stream_journal(host, port, stateless);
 
