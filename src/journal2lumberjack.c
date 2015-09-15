@@ -729,21 +729,6 @@ main(int argc, char **argv)
 
   nspr_tls_init(certdb);
 
-  PRFileDesc* nsprconn = nspr_tls_connect(host, port);
-
-  struct iobuf iobuf;
-  iobuf.nsprconn = nsprconn;
-  iobuf.inbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
-  iobuf.outbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
-  iobuf.inbuf_size = STREAM_BUFFER_SIZE;
-  iobuf.outbuf_size = STREAM_BUFFER_SIZE;
-  iobuf.inbuf_start = 0;
-  iobuf.inbuf_consumed = 0;
-  iobuf.outbuf_consumed = 0;
-  iobuf.outbuf_data_queue = 0;
-
-  uint32_t sent_sequence_number = 0;
-
   if (inotifytools_initialize() == 0)
     fprintf(stderr, "%s\n", strerror( inotifytools_error()));
 
@@ -773,6 +758,20 @@ main(int argc, char **argv)
   }
 
   sd_journal_seek_cursor(journal, acked_cursor);
+
+  struct iobuf iobuf;
+  iobuf.inbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
+  iobuf.outbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
+  iobuf.inbuf_size = STREAM_BUFFER_SIZE;
+  iobuf.outbuf_size = STREAM_BUFFER_SIZE;
+  iobuf.inbuf_start = 0;
+  iobuf.inbuf_consumed = 0;
+  iobuf.outbuf_consumed = 0;
+  iobuf.outbuf_data_queue = 0;
+  PRFileDesc* nsprconn = nspr_tls_connect(host, port);
+  iobuf.nsprconn = nsprconn;
+
+  uint32_t sent_sequence_number = 0;
 
   int persistent_update = 0;
 
