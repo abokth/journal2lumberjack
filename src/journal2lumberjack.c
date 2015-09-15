@@ -870,9 +870,6 @@ main(int argc, char **argv)
     if (sd_journal_next(journal) > 0) {
       reached_end = 0;
 
-      const void *data;
-      size_t length;
-
       start_lumberjack_data_frame(iobuf_p, ++sent_sequence_number);
 
       // send key + value
@@ -909,6 +906,9 @@ main(int argc, char **argv)
       journal_realtime_timestamp_msec[DATE_BUFFER_SIZE-1] = '\0';
       snprintf(journal_realtime_timestamp_msec, DATE_BUFFER_SIZE-1, "%ld", (long)(journal_realtime_timestamp_usec));
       write_lumberjack_string(iobuf_p, journal_realtime_timestamp_msec);
+
+      const void *data;
+      size_t length;
 
       SD_JOURNAL_FOREACH_DATA(journal, data, length) {
 	const char *keyvalue = (char *)data;
