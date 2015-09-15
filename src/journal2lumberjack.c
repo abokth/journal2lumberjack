@@ -69,6 +69,21 @@ struct iobuf {
   int outbuf_data_queue;
 };
 
+struct iobuf *
+new_iobuf(PRFileDesc* nsprconn) {
+  struct iobuf *iobuf_p = calloc(1, sizeof(struct iobuf));
+  iobuf_p->inbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
+  iobuf_p->outbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
+  iobuf_p->inbuf_size = STREAM_BUFFER_SIZE;
+  iobuf_p->outbuf_size = STREAM_BUFFER_SIZE;
+  iobuf_p->inbuf_start = 0;
+  iobuf_p->inbuf_consumed = 0;
+  iobuf_p->outbuf_consumed = 0;
+  iobuf_p->outbuf_data_queue = 0;
+  iobuf_p->nsprconn = nsprconn;
+  return iobuf_p;
+}
+
 // Returns true if there are at least this much available to read,
 // this works with both blocking and non-blocking file descriptors.
 int
@@ -655,6 +670,28 @@ nspr_tls_connect(const char *host, const char *port) {
   return nsprconn;
 }
 
+struct iobuf *
+iobuf_connect_tls(const char *host, const char *port) {
+  PRFileDesc* nsprconn = nspr_tls_connect(host, port);
+  return new_iobuf(nsprconn);
+}
+
+void
+iobuf_close(struct iobuf *iobuf_p) {
+  if (iobuf_p->nsprconn != NULL) {
+    if (PR_Shutdown(iobuf_p->nsprconn, PR_SHUTDOWN_BOTH) != PR_SUCCESS) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: PR_REad error %d: %s\n", err, PR_ErrorToName(err));
+      abort();
+    }
+    PR_Close(iobuf_p->nsprconn);
+    iobuf_p->nsprconn = NULL;
+  }
+  free(iobuf_p->inbuf);
+  free(iobuf_p->outbuf);
+  free(iobuf_p);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -767,17 +804,7 @@ main(int argc, char **argv)
   if (acked_cursor)
     sd_journal_seek_cursor(journal, acked_cursor);
 
-  struct iobuf iobuf;
-  iobuf.inbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
-  iobuf.outbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
-  iobuf.inbuf_size = STREAM_BUFFER_SIZE;
-  iobuf.outbuf_size = STREAM_BUFFER_SIZE;
-  iobuf.inbuf_start = 0;
-  iobuf.inbuf_consumed = 0;
-  iobuf.outbuf_consumed = 0;
-  iobuf.outbuf_data_queue = 0;
-  PRFileDesc* nsprconn = nspr_tls_connect(host, port);
-  iobuf.nsprconn = nsprconn;
+  struct iobuf *iobuf_p = iobuf_connect_tls(host, port);
 
   uint32_t sent_sequence_number = 0;
 
@@ -797,18 +824,18 @@ main(int argc, char **argv)
       size_t length;
       int num_fields = 0;
 
-      iobuf.outbuf_data_queue++;
-      write_lumberjack_frame_head(&iobuf, '1', 'D');
-      write_network_long_to_iobuf(&iobuf, ++sent_sequence_number);
+      iobuf_p->outbuf_data_queue++;
+      write_lumberjack_frame_head(iobuf_p, '1', 'D');
+      write_network_long_to_iobuf(iobuf_p, ++sent_sequence_number);
 
       // record where the dummy field count value is
-      size_t num_fields_pos = iobuf.outbuf_consumed;
-      write_network_long_to_iobuf(&iobuf, 0); // dummy value
+      size_t num_fields_pos = iobuf_p->outbuf_consumed;
+      write_network_long_to_iobuf(iobuf_p, 0); // dummy value
 
       // send key + value
       num_fields++;
-      write_lumberjack_string(&iobuf, "type");
-      write_lumberjack_string(&iobuf, "journal");
+      write_lumberjack_string(iobuf_p, "type");
+      write_lumberjack_string(iobuf_p, "journal");
 
       // __REALTIME_TIMESTAMP -> rfc -> timestamp
 
@@ -825,20 +852,20 @@ main(int argc, char **argv)
 
       // send key
       num_fields++;
-      write_lumberjack_string(&iobuf, "timestamp");
+      write_lumberjack_string(iobuf_p, "timestamp");
 
       // send value
-      write_rfc3339_date_to_iobuf(&iobuf, journal_realtime_timestamp_usec);
+      write_rfc3339_date_to_iobuf(iobuf_p, journal_realtime_timestamp_usec);
 
       // __REALTIME_TIMESTAMP -> journal_realtime_timestamp
 
       // send key + value
       num_fields++;
-      write_lumberjack_string(&iobuf, "journal_realtime_timestamp");
+      write_lumberjack_string(iobuf_p, "journal_realtime_timestamp");
       char journal_realtime_timestamp_msec[DATE_BUFFER_SIZE];
       journal_realtime_timestamp_msec[DATE_BUFFER_SIZE-1] = '\0';
       snprintf(journal_realtime_timestamp_msec, DATE_BUFFER_SIZE-1, "%ld", (long)(journal_realtime_timestamp_usec));
-      write_lumberjack_string(&iobuf, journal_realtime_timestamp_msec);
+      write_lumberjack_string(iobuf_p, journal_realtime_timestamp_msec);
 
       SD_JOURNAL_FOREACH_DATA(journal, data, length) {
 	const char *keyvalue = (char *)data;
@@ -856,10 +883,10 @@ main(int argc, char **argv)
 	if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
 	  // send key
 	  num_fields++;
-	  write_lumberjack_string(&iobuf, "source_timestamp");
+	  write_lumberjack_string(iobuf_p, "source_timestamp");
 	  // send value
 	  uint64_t source_timestamp_usec = (uint64_t)atoll(value);
-	  write_rfc3339_date_to_iobuf(&iobuf, source_timestamp_usec);
+	  write_rfc3339_date_to_iobuf(iobuf_p, source_timestamp_usec);
 	}
 
 	// MESSAGE -> line
@@ -872,39 +899,39 @@ main(int argc, char **argv)
 	// send key
 	num_fields++;
 	if (strncmp(keyvalue, "MESSAGE=", 8) == 0) {
-	  write_lumberjack_string(&iobuf, "line");
+	  write_lumberjack_string(iobuf_p, "line");
 	} else if (strncmp(keyvalue, "_HOSTNAME=", 10) == 0) {
-	  write_lumberjack_string(&iobuf, "host");
+	  write_lumberjack_string(iobuf_p, "host");
 	} else if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
-	  write_lumberjack_string(&iobuf, "source_realtime_timestamp");
+	  write_lumberjack_string(iobuf_p, "source_realtime_timestamp");
 	} else if (strncmp(keyvalue, "_", 1) == 0) {
 	  if (strncmp(keyvalue, "__", 2) == 0) {
 	    // __FOO -> journal_foo
-	    write_network_long_to_iobuf(&iobuf, key_length - 1 + 7);
-	    write_buf_to_iobuf(&iobuf, (uint8_t *)"journal", 7);
+	    write_network_long_to_iobuf(iobuf_p, key_length - 1 + 7);
+	    write_buf_to_iobuf(iobuf_p, (uint8_t *)"journal", 7);
 	  } else {
 	    // _FOO -> foo
-	    write_network_long_to_iobuf(&iobuf, key_length - 1);
+	    write_network_long_to_iobuf(iobuf_p, key_length - 1);
 	  }
 	  for (size_t i=1; i<key_length; i++) {
 	    uint8_t lowercase = (uint8_t)tolower(keyvalue[i]);
-	    write_buf_to_iobuf(&iobuf, &lowercase, 1);
+	    write_buf_to_iobuf(iobuf_p, &lowercase, 1);
 	  }
 	} else {
-	  write_network_long_to_iobuf(&iobuf, key_length);
-	  write_buf_to_iobuf(&iobuf, (uint8_t *)keyvalue, key_length);
+	  write_network_long_to_iobuf(iobuf_p, key_length);
+	  write_buf_to_iobuf(iobuf_p, (uint8_t *)keyvalue, key_length);
 	}
 
 	// send value
-	write_network_long_to_iobuf(&iobuf, value_length);
-	write_buf_to_iobuf(&iobuf, (uint8_t *)value, value_length);
+	write_network_long_to_iobuf(iobuf_p, value_length);
+	write_buf_to_iobuf(iobuf_p, (uint8_t *)value, value_length);
       }
 
       // replace the dummy value with the proper one before sending
-      write_network_long_to_iobuf_at(&iobuf, num_fields, num_fields_pos);
+      write_network_long_to_iobuf_at(iobuf_p, num_fields, num_fields_pos);
     }
 
-    int acked = flush_lumberjack_data(&iobuf, reached_end);
+    int acked = flush_lumberjack_data(iobuf_p, reached_end);
     if (acked) {
       if (acked_cursor) free(acked_cursor);
       sd_journal_get_cursor(journal, &acked_cursor);
@@ -941,12 +968,7 @@ main(int argc, char **argv)
     }
   }
 
-  if (PR_Shutdown(iobuf.nsprconn, PR_SHUTDOWN_BOTH) != PR_SUCCESS) {
-    const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: PR_REad error %d: %s\n", err, PR_ErrorToName(err));
-    abort();
-  }
-  PR_Close(iobuf.nsprconn);
+  iobuf_close(iobuf_p);
 
   sd_journal_close(journal);
   exit(0);
