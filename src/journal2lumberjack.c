@@ -56,6 +56,12 @@ usage() {
   fprintf(stderr, "Usage: journal2lumberjack [--stateless] --host <lumberjack host> --port <port> --certdb <lumberjack CA>\n");
 }
 
+void
+__attribute__ ((noreturn)) errx(const char *error) {
+  fprintf(stderr, "Error: %s\n", error);
+  exit(3);
+}
+
 #define RUNTIME_CURSOR_FILE "/run/journal-export-acked-cursor"
 #define PERSISTENT_CURSOR_FILE "/var/lib/journal-export-acked-cursor"
 
@@ -76,7 +82,7 @@ load_cursor(const char *filename) {
 void
 save_cursor(const char *filename, const char *acked_cursor) {
   FILE *statefile = fopen(filename, "w");
-  if (statefile == NULL) abort();
+  if (statefile == NULL) errx("State file update failed.");
   fprintf(statefile, acked_cursor);
   fclose(statefile);
 }
@@ -96,19 +102,19 @@ watch_journal_paths() {
   if (res == 0) {
     found_journal = 1;
     res = inotifytools_watch_recursively(RUNTIME_JOURNAL_DIR, IN_MODIFY | IN_CREATE);
-    if (res == 0) abort();
+    if (res == 0) errx("Inotify failure watching runtime journal.");
   }
     
   res = stat(PERSISTENT_JOURNAL_DIR, &s);
   if (res == 0) {
     found_journal = 1;
     res = inotifytools_watch_recursively(PERSISTENT_JOURNAL_DIR, IN_MODIFY | IN_CREATE);
-    if (res == 0) abort();
+    if (res == 0) errx("Inotify failure watching persistent journal.");
     persistent = 1;
   }
 
   if (!found_journal)
-    abort();
+     errx("No journal found.");
 
   return persistent;
 }
@@ -134,7 +140,7 @@ struct happy_eyeballs {
 void
 happy_eyeballs_lookup(struct happy_eyeballs **state_p, const char *host, const char *port) {
   struct happy_eyeballs *state = calloc(1, sizeof(struct happy_eyeballs));
-  if (state == NULL) abort();
+  if (state == NULL) errx("Allocation failure.");
 
   // Happy eyeballs connect.
   struct addrinfo hints;
@@ -143,7 +149,7 @@ happy_eyeballs_lookup(struct happy_eyeballs **state_p, const char *host, const c
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_ADDRCONFIG;
   int res = getaddrinfo(host, port, &hints, &(state->server_addresses));
-  if (res) abort();
+  if (res) errx("Host name lookup failure.");
 
   // count results
   int results = 0;
@@ -153,7 +159,7 @@ happy_eyeballs_lookup(struct happy_eyeballs **state_p, const char *host, const c
   state->num_addr = results;
 
   struct addrinfo **addresses = calloc(state->num_addr, sizeof(struct addrinfo *));
-  if (addresses == NULL) abort();
+  if (addresses == NULL) errx("Allocation failure.");
 
   int *ai_families = calloc(state->num_addr, sizeof(int));
   int addri = 0, num_fam = 0;
@@ -173,7 +179,7 @@ happy_eyeballs_lookup(struct happy_eyeballs **state_p, const char *host, const c
   }
 
   state->sockets = (struct happy_socket *)calloc(state->num_addr, sizeof(struct happy_socket));
-  if (state->sockets == NULL) abort();
+  if (state->sockets == NULL) errx("Allocation failure.");
 
   int order = 0, found = 1;
   while (found) {
@@ -243,7 +249,7 @@ happy_eyeballs_connect(struct happy_eyeballs *state) {
   }
   if (nfds) {
     int ret = select(nfds, NULL, &waiting_fds, NULL, &wait);
-    if (ret == -1 && ret != EINTR) abort();
+    if (ret == -1 && ret != EINTR) errx("Error while waiting for connection.");
 
     for (int i=0; i<state->num_addr; i++) {
       if (FD_ISSET(state->sockets[i].fd, &waiting_fds)) {
@@ -302,7 +308,7 @@ nspr_tls_init(const char *certdb) {
   if (ctx == NULL) {
     const PRErrorCode err = PR_GetError();
     fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
-    abort();
+    errx("TLS error");
   }
 
   // Ciphers to enable.
@@ -323,7 +329,7 @@ nspr_tls_init(const char *certdb) {
     if (SSL_CipherPolicyGet(*p, &policy) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
       fprintf(stderr, "error: policy for cipher %u: error %d: %s\n", (unsigned)*p, err, PR_ErrorToName(err));
-      abort();
+      errx("TLS error");
     }
     if (policy == SSL_ALLOWED) {
       //fprintf(stderr, "info: found cipher %x\n", (unsigned)*p);
@@ -335,7 +341,7 @@ nspr_tls_init(const char *certdb) {
     if (NSS_SetDomesticPolicy() != SECSuccess) {
       const PRErrorCode err = PR_GetError();
       fprintf(stderr, "error: NSS_SetDomesticPolicy: error %d: %s\n", err, PR_ErrorToName(err));
-      abort();
+      errx("TLS error");
     }
   }
 
@@ -345,7 +351,7 @@ nspr_tls_init(const char *certdb) {
   if (module == NULL || !module->loaded) {
     const PRErrorCode err = PR_GetError();
     fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
-    abort();
+    errx("TLS error");
   }
 }
 
@@ -359,7 +365,7 @@ nspr_tls_handshake(const int sockfd, const char *host, char **error_p) {
     if (newfd == NULL) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: NSPR error code %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
+      if (asprintf(error_p, "error: NSPR error code %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
     model = newfd;
@@ -367,19 +373,19 @@ nspr_tls_handshake(const int sockfd, const char *host, char **error_p) {
     if (SSL_OptionSet(model, SSL_ENABLE_SSL2, PR_FALSE) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: set SSL_ENABLE_SSL2 to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
+      if (asprintf(error_p, "error: set SSL_ENABLE_SSL2 to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
     if (SSL_OptionSet(model, SSL_V2_COMPATIBLE_HELLO, PR_FALSE) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: set SSL_V2_COMPATIBLE_HELLO to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
+      if (asprintf(error_p, "error: set SSL_V2_COMPATIBLE_HELLO to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
     if (SSL_OptionSet(model, SSL_ENABLE_DEFLATE, PR_FALSE) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: set SSL_ENABLE_DEFLATE to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
+      if (asprintf(error_p, "error: set SSL_ENABLE_DEFLATE to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
 
@@ -387,7 +393,7 @@ nspr_tls_handshake(const int sockfd, const char *host, char **error_p) {
     if (newfd == NULL) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: SSL_ImportFD error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
+      if (asprintf(error_p, "error: SSL_ImportFD error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
     nspr = newfd;
@@ -397,19 +403,19 @@ nspr_tls_handshake(const int sockfd, const char *host, char **error_p) {
   if (SSL_ResetHandshake(nspr, PR_FALSE) != SECSuccess) {
     const PRErrorCode err = PR_GetError();
     if (*error_p) free(*error_p);
-    if (asprintf(error_p, "error: SSL_ResetHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
+    if (asprintf(error_p, "error: SSL_ResetHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
     return NULL;
   }
   if (SSL_SetURL(nspr, host) != SECSuccess) {
     const PRErrorCode err = PR_GetError();
     if (*error_p) free(*error_p);
-    if (asprintf(error_p, "error: SSL_SetURL error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
+    if (asprintf(error_p, "error: SSL_SetURL error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
     return NULL;
   }
   if (SSL_ForceHandshake(nspr) != SECSuccess) {
     const PRErrorCode err = PR_GetError();
     if (*error_p) free(*error_p);
-    if (asprintf(error_p, "error: SSL_ForceHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
+    if (asprintf(error_p, "error: SSL_ForceHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
     return NULL;
   }
 
@@ -428,13 +434,9 @@ nspr_tls_connect(const char *host, const char *port) {
     if (sockfd == 0)
       continue;
     if (sockfd < 0) {
-      if (last_tls_error != NULL) {
-	fprintf(stderr, last_tls_error);
-	free(last_tls_error);
-      } else {
-	fprintf(stderr, "error: No TCP connection could be established.");
-      }
-      abort();
+      if (last_tls_error != NULL)
+	errx(last_tls_error);
+      errx("No TCP connection could be established.");
     }
     nsprconn = nspr_tls_handshake(sockfd, host, &last_tls_error);
   } while (nsprconn == NULL);
@@ -448,8 +450,8 @@ void
 nspr_tls_close(PRFileDesc* nsprconn) {
   if (PR_Shutdown(nsprconn, PR_SHUTDOWN_BOTH) != PR_SUCCESS) {
     const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: PR_REad error %d: %s\n", err, PR_ErrorToName(err));
-    abort();
+    fprintf(stderr, "error: PR_Read error %d: %s\n", err, PR_ErrorToName(err));
+    errx("TLS error");
   }
   PR_Close(nsprconn);
 }
@@ -503,7 +505,7 @@ poll_iobuf(struct iobuf *iobuf_p, size_t bytes) {
     PRInt32 count = PR_Read(iobuf_p->nsprconn, (void *)(&iobuf_p->inbuf[iobuf_p->inbuf_consumed]), (PRInt32)free_buffer_space);
     if (count <= 0) {
       if (errno != EAGAIN && errno != EWOULDBLOCK) {
-	abort();
+	errx("TLS read error");
       }
       count = 0;
     }
@@ -537,7 +539,7 @@ read_buf_from_iobuf(struct iobuf *iobuf_p, const uint8_t *buf, size_t size) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
 	continue;
       } else {
-	abort();
+	errx("TLS read error");
       }
       count = 0;
     }
@@ -555,7 +557,7 @@ lumberjack_package_frames(struct iobuf *iobuf_p) {
     to_alloc *= 2;
 
   uint8_t *compressbuf = calloc(to_alloc, sizeof(uint8_t));
-  if (compressbuf == NULL) abort();
+  if (compressbuf == NULL) errx("Allocation failure.");
   uLong compressed_size = to_alloc - 12;
 
   // Set window size to the number of queued data frames.
@@ -565,7 +567,7 @@ lumberjack_package_frames(struct iobuf *iobuf_p) {
   *window_size_p = htonl(iobuf_p->outbuf_data_queue);
 
   err = compress(&compressbuf[12], &compressed_size, (const Bytef*)(iobuf_p->outbuf), (uLong)(iobuf_p->outbuf_consumed));
-  if (err != Z_OK) abort();
+  if (err != Z_OK) errx("zlib compression error");
 
   // Start compressed frame.
   compressbuf[6] = '1';
@@ -588,7 +590,7 @@ lumberjack_package_frames(struct iobuf *iobuf_p) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
 	continue;
       } else {
-	abort();
+	errx("TLS write error");
       }
       count = 0;
     }
@@ -609,7 +611,7 @@ write_buf_to_iobuf(struct iobuf *iobuf_p, const uint8_t *buf, size_t size) {
     if (iobuf_p->outbuf_size == iobuf_p->outbuf_consumed) {
       size_t newsize = iobuf_p->outbuf_size * 2;
       uint8_t *newbuf = realloc(iobuf_p->outbuf, newsize);
-      if (newbuf == NULL) abort();
+      if (newbuf == NULL) errx("Allocation failure.");
       iobuf_p->outbuf = newbuf;
       iobuf_p->outbuf_size = newsize;
     }
@@ -666,7 +668,7 @@ read_lumberjack_ack(struct iobuf *iobuf_p) {
     return read_network_long_from_iobuf(iobuf_p);
   } else {
     // Don't know the size of any other frame types.
-    abort();
+    errx("Lumberjack protocol error");
   }
 }
 
@@ -899,9 +901,8 @@ send_journal_through_lumberjack(sd_journal *journal, struct iobuf *iobuf_p, int 
 
 	sd_journal_close(journal);
 	int res = sd_journal_open(&journal, 0);
-	if (res) {
-	  abort();
-	}
+	if (res)
+	  errx("Journal error");
 	sd_journal_seek_cursor(journal, acked_cursor);
       }
     }
@@ -914,9 +915,8 @@ open_and_stream_journal(char *host, char *port, int stateless) {
 
   sd_journal *journal;
   int res = sd_journal_open(&journal, 0);
-  if (res) {
-    abort();
-  }
+  if (res)
+    errx("Journal error");
 
   char *acked_cursor = NULL;
 
@@ -1011,13 +1011,13 @@ main(int argc, char **argv)
 
       default:
 	usage();
-	abort();
+	exit(1);
       }
   }
 
   if (optind < argc) {
     usage();
-    abort();
+    exit(1);
   }
 
   if (help_flag || host == NULL || port == NULL || certdb == NULL) {
