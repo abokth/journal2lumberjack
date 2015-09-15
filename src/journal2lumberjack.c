@@ -915,6 +915,13 @@ main(int argc, char **argv)
     }
   }
 
+  if (PR_Shutdown(nspr, PR_SHUTDOWN_BOTH) != PR_SUCCESS) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: PR_REad error %d: %s\n", err, PR_ErrorToName(err));
+    abort();
+  }
+  PR_Close(nspr);
+
   sd_journal_close(journal);
   exit(0);
 }
