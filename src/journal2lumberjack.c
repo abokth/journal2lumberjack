@@ -839,6 +839,75 @@ send_journal_entry_through_lumberjack(sd_journal *journal, uint64_t journal_real
   }
 }
 
+void
+send_journal_through_lumberjack(sd_journal *journal, struct iobuf *iobuf_p, int persistent, int stateless, char *acked_cursor) {
+  uint32_t sent_sequence_number = 0;
+
+  int persistent_update = 0;
+  uint64_t last_persistent_update = 0;
+
+  int cont = 1;
+
+  while(cont) {
+    int reached_end = 1;
+
+    if (sd_journal_next(journal) > 0) {
+      reached_end = 0;
+
+      uint64_t journal_realtime_timestamp_usec;
+      int res = sd_journal_get_realtime_usec(journal, &journal_realtime_timestamp_usec);
+      if (res) abort();
+
+      send_journal_entry_through_lumberjack(journal, journal_realtime_timestamp_usec, iobuf_p, ++sent_sequence_number);
+
+      uint64_t truncated_time = journal_realtime_timestamp_usec & ~(time_t)0xfffffff;
+      if (truncated_time > last_persistent_update) {
+	// About every five minutes of records.
+	last_persistent_update = truncated_time;
+	persistent_update = 1;
+      }
+    }
+
+    // If reached the end of the journal, force a flush and wait for the ack.
+    // Else, there might be a flush anyway depending on buffer usage.
+    int acked = flush_lumberjack_data(iobuf_p, reached_end);
+    if (acked) {
+      if (acked_cursor) free(acked_cursor);
+      sd_journal_get_cursor(journal, &acked_cursor);
+      if (!stateless) {
+	save_cursor(RUNTIME_CURSOR_FILE, acked_cursor);
+	if (persistent && persistent_update)
+	  save_cursor(PERSISTENT_CURSOR_FILE, acked_cursor);
+	persistent_update = 0;
+      }
+    }
+
+    if (reached_end) {
+      // We reached the end of the journal, sleep until something happens.
+      struct inotify_event *event = inotifytools_next_event(-1);
+
+      //inotifytools_printf( event, "%T %w%f %e\n" );
+
+      // what's the proper API for checking the type?
+      char eventtype[30];
+      eventtype[29] = '\0';
+      inotifytools_snprintf( eventtype, 29, event, "%e" );
+      if (strcmp(eventtype, "CREATE") == 0) {
+	// The journal was rotated, need to watch the new file and reopen the journal.
+
+	persistent = watch_journal_paths();
+
+	sd_journal_close(journal);
+	int res = sd_journal_open(&journal, 0);
+	if (res) {
+	  abort();
+	}
+	sd_journal_seek_cursor(journal, acked_cursor);
+      }
+    }
+  }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -932,11 +1001,8 @@ main(int argc, char **argv)
 
   int persistent = watch_journal_paths();
 
-  int res;
-
   sd_journal *journal;
-
-  res = sd_journal_open(&journal, 0);
+  int res = sd_journal_open(&journal, 0);
   if (res) {
     abort();
   }
@@ -953,71 +1019,7 @@ main(int argc, char **argv)
 
   struct iobuf *iobuf_p = iobuf_connect_tls(host, port);
 
-  uint32_t sent_sequence_number = 0;
-
-  int persistent_update = 0;
-  uint64_t last_persistent_update = 0;
-
-  int cont = 1;
-
-  while(cont) {
-    int reached_end = 1;
-
-    if (sd_journal_next(journal) > 0) {
-      reached_end = 0;
-
-      uint64_t journal_realtime_timestamp_usec;
-      int res = sd_journal_get_realtime_usec(journal, &journal_realtime_timestamp_usec);
-      if (res) abort();
-
-      send_journal_entry_through_lumberjack(journal, journal_realtime_timestamp_usec, iobuf_p, ++sent_sequence_number);
-
-      uint64_t truncated_time = journal_realtime_timestamp_usec & ~(time_t)0xfffffff;
-      if (truncated_time > last_persistent_update) {
-	// About every five minutes of records.
-	last_persistent_update = truncated_time;
-	persistent_update = 1;
-      }
-    }
-
-    // If reached the end of the journal, force a flush and wait for the ack.
-    // Else, there might be a flush anyway depending on buffer usage.
-    int acked = flush_lumberjack_data(iobuf_p, reached_end);
-    if (acked) {
-      if (acked_cursor) free(acked_cursor);
-      sd_journal_get_cursor(journal, &acked_cursor);
-      if (!stateless) {
-	save_cursor(RUNTIME_CURSOR_FILE, acked_cursor);
-	if (persistent && persistent_update)
-	  save_cursor(PERSISTENT_CURSOR_FILE, acked_cursor);
-	persistent_update = 0;
-      }
-    }
-
-    if (reached_end) {
-      // We reached the end of the journal, sleep until something happens.
-      struct inotify_event *event = inotifytools_next_event(-1);
-
-      //inotifytools_printf( event, "%T %w%f %e\n" );
-
-      // what's the proper API for checking the type?
-      char eventtype[30];
-      eventtype[29] = '\0';
-      inotifytools_snprintf( eventtype, 29, event, "%e" );
-      if (strcmp(eventtype, "CREATE") == 0) {
-	// The journal was rotated, need to watch the new file and reopen the journal.
-
-	persistent = watch_journal_paths();
-
-	sd_journal_close(journal);
-	int res = sd_journal_open(&journal, 0);
-	if (res) {
-	  abort();
-	}
-	sd_journal_seek_cursor(journal, acked_cursor);
-      }
-    }
-  }
+  send_journal_through_lumberjack(journal, iobuf_p, persistent, stateless, acked_cursor);
 
   // this will never be reached
 
