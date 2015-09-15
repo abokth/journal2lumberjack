@@ -742,6 +742,103 @@ flush_lumberjack_data(struct iobuf *iobuf_p, int force) {
   return 0;
 }
 
+void
+send_journal_entry_field_through_lumberjack(struct iobuf *iobuf_p, const void *data, size_t length) {
+  const char *keyvalue = (char *)data;
+
+  // separate the key and value
+  const char *separator = strchr(keyvalue, '=');
+  if (!separator) abort();
+  size_t key_length = separator - keyvalue;
+
+  const char *value = &(separator[1]);
+  size_t value_length = length - key_length - 1;
+
+  // _SOURCE_REALTIME_TIMESTAMP -> rfc -> source_timestamp
+
+  if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
+    // send key
+    lumberjack_data_inc_field_count(iobuf_p);
+    write_lumberjack_string(iobuf_p, "source_timestamp");
+    // send value
+    uint64_t source_timestamp_usec = (uint64_t)atoll(value);
+    write_rfc3339_date_to_iobuf(iobuf_p, source_timestamp_usec);
+  }
+
+  // MESSAGE -> line
+  // _HOSTNAME -> host
+  // _SOURCE_REALTIME_TIMESTAMP -> source_realtime_timestamp
+  // __(.*) -> lowercase -> journal_\1
+  // _(.*) -> lowercase -> \1
+  // (.*) -> \1
+
+  // send key
+  lumberjack_data_inc_field_count(iobuf_p);
+  if (strncmp(keyvalue, "MESSAGE=", 8) == 0) {
+    write_lumberjack_string(iobuf_p, "line");
+  } else if (strncmp(keyvalue, "_HOSTNAME=", 10) == 0) {
+    write_lumberjack_string(iobuf_p, "host");
+  } else if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
+    write_lumberjack_string(iobuf_p, "source_realtime_timestamp");
+  } else if (strncmp(keyvalue, "_", 1) == 0) {
+    if (strncmp(keyvalue, "__", 2) == 0) {
+      // __FOO -> journal_foo
+      write_network_long_to_iobuf(iobuf_p, key_length - 1 + 7);
+      write_buf_to_iobuf(iobuf_p, (uint8_t *)"journal", 7);
+    } else {
+      // _FOO -> foo
+      write_network_long_to_iobuf(iobuf_p, key_length - 1);
+    }
+    for (size_t i=1; i<key_length; i++) {
+      uint8_t lowercase = (uint8_t)tolower(keyvalue[i]);
+      write_buf_to_iobuf(iobuf_p, &lowercase, 1);
+    }
+  } else {
+    write_network_long_to_iobuf(iobuf_p, key_length);
+    write_buf_to_iobuf(iobuf_p, (uint8_t *)keyvalue, key_length);
+  }
+
+  // send value
+  write_network_long_to_iobuf(iobuf_p, value_length);
+  write_buf_to_iobuf(iobuf_p, (uint8_t *)value, value_length);
+}
+
+void
+send_journal_entry_through_lumberjack(sd_journal *journal, uint64_t journal_realtime_timestamp_usec, struct iobuf *iobuf_p, uint32_t sequence_number) {
+  start_lumberjack_data_frame(iobuf_p, sequence_number);
+
+  // send key + value
+  lumberjack_data_inc_field_count(iobuf_p);
+  write_lumberjack_string(iobuf_p, "type");
+  write_lumberjack_string(iobuf_p, "journal");
+
+  // __REALTIME_TIMESTAMP -> rfc -> timestamp
+
+  // send key
+  lumberjack_data_inc_field_count(iobuf_p);
+  write_lumberjack_string(iobuf_p, "timestamp");
+
+  // send value
+  write_rfc3339_date_to_iobuf(iobuf_p, journal_realtime_timestamp_usec);
+
+  // __REALTIME_TIMESTAMP -> journal_realtime_timestamp
+
+  // send key + value
+  lumberjack_data_inc_field_count(iobuf_p);
+  write_lumberjack_string(iobuf_p, "journal_realtime_timestamp");
+  char journal_realtime_timestamp_msec[DATE_BUFFER_SIZE];
+  journal_realtime_timestamp_msec[DATE_BUFFER_SIZE-1] = '\0';
+  snprintf(journal_realtime_timestamp_msec, DATE_BUFFER_SIZE-1, "%ld", (long)(journal_realtime_timestamp_usec));
+  write_lumberjack_string(iobuf_p, journal_realtime_timestamp_msec);
+
+  const void *data;
+  size_t length;
+
+  SD_JOURNAL_FOREACH_DATA(journal, data, length) {
+    send_journal_entry_field_through_lumberjack(iobuf_p, data, length);
+  }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -859,7 +956,6 @@ main(int argc, char **argv)
   uint32_t sent_sequence_number = 0;
 
   int persistent_update = 0;
-
   uint64_t last_persistent_update = 0;
 
   int cont = 1;
@@ -870,18 +966,11 @@ main(int argc, char **argv)
     if (sd_journal_next(journal) > 0) {
       reached_end = 0;
 
-      start_lumberjack_data_frame(iobuf_p, ++sent_sequence_number);
-
-      // send key + value
-      lumberjack_data_inc_field_count(iobuf_p);
-      write_lumberjack_string(iobuf_p, "type");
-      write_lumberjack_string(iobuf_p, "journal");
-
-      // __REALTIME_TIMESTAMP -> rfc -> timestamp
-
       uint64_t journal_realtime_timestamp_usec;
       int res = sd_journal_get_realtime_usec(journal, &journal_realtime_timestamp_usec);
       if (res) abort();
+
+      send_journal_entry_through_lumberjack(journal, journal_realtime_timestamp_usec, iobuf_p, ++sent_sequence_number);
 
       uint64_t truncated_time = journal_realtime_timestamp_usec & ~(time_t)0xfffffff;
       if (truncated_time > last_persistent_update) {
@@ -889,88 +978,10 @@ main(int argc, char **argv)
 	last_persistent_update = truncated_time;
 	persistent_update = 1;
       }
-
-      // send key
-      lumberjack_data_inc_field_count(iobuf_p);
-      write_lumberjack_string(iobuf_p, "timestamp");
-
-      // send value
-      write_rfc3339_date_to_iobuf(iobuf_p, journal_realtime_timestamp_usec);
-
-      // __REALTIME_TIMESTAMP -> journal_realtime_timestamp
-
-      // send key + value
-      lumberjack_data_inc_field_count(iobuf_p);
-      write_lumberjack_string(iobuf_p, "journal_realtime_timestamp");
-      char journal_realtime_timestamp_msec[DATE_BUFFER_SIZE];
-      journal_realtime_timestamp_msec[DATE_BUFFER_SIZE-1] = '\0';
-      snprintf(journal_realtime_timestamp_msec, DATE_BUFFER_SIZE-1, "%ld", (long)(journal_realtime_timestamp_usec));
-      write_lumberjack_string(iobuf_p, journal_realtime_timestamp_msec);
-
-      const void *data;
-      size_t length;
-
-      SD_JOURNAL_FOREACH_DATA(journal, data, length) {
-	const char *keyvalue = (char *)data;
-
-	// separate the key and value
-	const char *separator = strchr(keyvalue, '=');
-	if (!separator) abort();
-	size_t key_length = separator - keyvalue;
-
-	const char *value = &(separator[1]);
-	size_t value_length = length - key_length - 1;
-
-	// _SOURCE_REALTIME_TIMESTAMP -> rfc -> source_timestamp
-
-	if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
-	  // send key
-	  lumberjack_data_inc_field_count(iobuf_p);
-	  write_lumberjack_string(iobuf_p, "source_timestamp");
-	  // send value
-	  uint64_t source_timestamp_usec = (uint64_t)atoll(value);
-	  write_rfc3339_date_to_iobuf(iobuf_p, source_timestamp_usec);
-	}
-
-	// MESSAGE -> line
-	// _HOSTNAME -> host
-	// _SOURCE_REALTIME_TIMESTAMP -> source_realtime_timestamp
-	// __(.*) -> lowercase -> journal_\1
-	// _(.*) -> lowercase -> \1
-	// (.*) -> \1
-
-	// send key
-	lumberjack_data_inc_field_count(iobuf_p);
-	if (strncmp(keyvalue, "MESSAGE=", 8) == 0) {
-	  write_lumberjack_string(iobuf_p, "line");
-	} else if (strncmp(keyvalue, "_HOSTNAME=", 10) == 0) {
-	  write_lumberjack_string(iobuf_p, "host");
-	} else if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
-	  write_lumberjack_string(iobuf_p, "source_realtime_timestamp");
-	} else if (strncmp(keyvalue, "_", 1) == 0) {
-	  if (strncmp(keyvalue, "__", 2) == 0) {
-	    // __FOO -> journal_foo
-	    write_network_long_to_iobuf(iobuf_p, key_length - 1 + 7);
-	    write_buf_to_iobuf(iobuf_p, (uint8_t *)"journal", 7);
-	  } else {
-	    // _FOO -> foo
-	    write_network_long_to_iobuf(iobuf_p, key_length - 1);
-	  }
-	  for (size_t i=1; i<key_length; i++) {
-	    uint8_t lowercase = (uint8_t)tolower(keyvalue[i]);
-	    write_buf_to_iobuf(iobuf_p, &lowercase, 1);
-	  }
-	} else {
-	  write_network_long_to_iobuf(iobuf_p, key_length);
-	  write_buf_to_iobuf(iobuf_p, (uint8_t *)keyvalue, key_length);
-	}
-
-	// send value
-	write_network_long_to_iobuf(iobuf_p, value_length);
-	write_buf_to_iobuf(iobuf_p, (uint8_t *)value, value_length);
-      }
     }
 
+    // If reached the end of the journal, force a flush and wait for the ack.
+    // Else, there might be a flush anyway depending on buffer usage.
     int acked = flush_lumberjack_data(iobuf_p, reached_end);
     if (acked) {
       if (acked_cursor) free(acked_cursor);
