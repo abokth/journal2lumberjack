@@ -464,7 +464,8 @@ struct iobuf {
   size_t inbuf_start; // first used byte
   size_t inbuf_consumed, outbuf_consumed; // first free byte
   size_t inbuf_size, outbuf_size;
-  int outbuf_data_queue;
+  size_t outbuf_data_field_count_pos;
+  int outbuf_data_queue, outbuf_data_field_count;
 };
 
 struct iobuf *
@@ -703,6 +704,26 @@ write_lumberjack_frame_head(struct iobuf *iobuf_p, uint8_t version, uint8_t type
   write_buf_to_iobuf(iobuf_p, lumberjack_framehead, 2);
 }
 
+void
+start_lumberjack_data_frame(struct iobuf *iobuf_p, uint32_t sequence_number) {
+  iobuf_p->outbuf_data_queue++;
+  write_lumberjack_frame_head(iobuf_p, '1', 'D');
+  write_network_long_to_iobuf(iobuf_p, sequence_number);
+
+  // record where the dummy field count value is
+  iobuf_p->outbuf_data_field_count_pos = iobuf_p->outbuf_consumed;
+  write_network_long_to_iobuf(iobuf_p, 0); // dummy value
+
+  // reset real field count value
+  iobuf_p->outbuf_data_field_count = 0;
+}
+
+void
+end_lumberjack_data_frame(struct iobuf *iobuf_p) {
+  // replace the dummy value with the proper one before sending
+  write_network_long_to_iobuf_at(iobuf_p, iobuf_p->outbuf_data_field_count, iobuf_p->outbuf_data_field_count_pos);
+}
+
 int
 flush_lumberjack_data(struct iobuf *iobuf_p, int force) {
   if (iobuf_p->outbuf_data_queue > 0 && (force || iobuf_p->outbuf_consumed >= iobuf_p->outbuf_size / 2)) {
@@ -844,18 +865,11 @@ main(int argc, char **argv)
 
       const void *data;
       size_t length;
-      int num_fields = 0;
 
-      iobuf_p->outbuf_data_queue++;
-      write_lumberjack_frame_head(iobuf_p, '1', 'D');
-      write_network_long_to_iobuf(iobuf_p, ++sent_sequence_number);
-
-      // record where the dummy field count value is
-      size_t num_fields_pos = iobuf_p->outbuf_consumed;
-      write_network_long_to_iobuf(iobuf_p, 0); // dummy value
+      start_lumberjack_data_frame(iobuf_p, ++sent_sequence_number);
 
       // send key + value
-      num_fields++;
+      iobuf_p->outbuf_data_field_count++;
       write_lumberjack_string(iobuf_p, "type");
       write_lumberjack_string(iobuf_p, "journal");
 
@@ -873,7 +887,7 @@ main(int argc, char **argv)
       }
 
       // send key
-      num_fields++;
+      iobuf_p->outbuf_data_field_count++;
       write_lumberjack_string(iobuf_p, "timestamp");
 
       // send value
@@ -882,7 +896,7 @@ main(int argc, char **argv)
       // __REALTIME_TIMESTAMP -> journal_realtime_timestamp
 
       // send key + value
-      num_fields++;
+      iobuf_p->outbuf_data_field_count++;
       write_lumberjack_string(iobuf_p, "journal_realtime_timestamp");
       char journal_realtime_timestamp_msec[DATE_BUFFER_SIZE];
       journal_realtime_timestamp_msec[DATE_BUFFER_SIZE-1] = '\0';
@@ -904,7 +918,7 @@ main(int argc, char **argv)
 
 	if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
 	  // send key
-	  num_fields++;
+	  iobuf_p->outbuf_data_field_count++;
 	  write_lumberjack_string(iobuf_p, "source_timestamp");
 	  // send value
 	  uint64_t source_timestamp_usec = (uint64_t)atoll(value);
@@ -919,7 +933,7 @@ main(int argc, char **argv)
 	// (.*) -> \1
 
 	// send key
-	num_fields++;
+	iobuf_p->outbuf_data_field_count++;
 	if (strncmp(keyvalue, "MESSAGE=", 8) == 0) {
 	  write_lumberjack_string(iobuf_p, "line");
 	} else if (strncmp(keyvalue, "_HOSTNAME=", 10) == 0) {
@@ -949,8 +963,7 @@ main(int argc, char **argv)
 	write_buf_to_iobuf(iobuf_p, (uint8_t *)value, value_length);
       }
 
-      // replace the dummy value with the proper one before sending
-      write_network_long_to_iobuf_at(iobuf_p, num_fields, num_fields_pos);
+      end_lumberjack_data_frame(iobuf_p);
     }
 
     int acked = flush_lumberjack_data(iobuf_p, reached_end);
