@@ -350,7 +350,7 @@ nspr_tls_init(const char *certdb) {
 }
 
 PRFileDesc*
-nspr_tls_handshake(const int sockfd, const char *host) {
+nspr_tls_handshake(const int sockfd, const char *host, char **error_p) {
   PRFileDesc* nspr = PR_ImportTCPSocket(sockfd);
 
   {
@@ -358,31 +358,36 @@ nspr_tls_handshake(const int sockfd, const char *host) {
     PRFileDesc *newfd = SSL_ImportFD(NULL, model);
     if (newfd == NULL) {
       const PRErrorCode err = PR_GetError();
-      fprintf(stderr, "error: NSPR error code %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      if (*error_p) free(*error_p);
+      if (asprintf(error_p, "error: NSPR error code %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
       return NULL;
     }
     model = newfd;
     newfd = NULL;
     if (SSL_OptionSet(model, SSL_ENABLE_SSL2, PR_FALSE) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
-      fprintf(stderr, "error: set SSL_ENABLE_SSL2 to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      if (*error_p) free(*error_p);
+      if (asprintf(error_p, "error: set SSL_ENABLE_SSL2 to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
       return NULL;
     }
     if (SSL_OptionSet(model, SSL_V2_COMPATIBLE_HELLO, PR_FALSE) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
-      fprintf(stderr, "error: set SSL_V2_COMPATIBLE_HELLO to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      if (*error_p) free(*error_p);
+      if (asprintf(error_p, "error: set SSL_V2_COMPATIBLE_HELLO to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
       return NULL;
     }
     if (SSL_OptionSet(model, SSL_ENABLE_DEFLATE, PR_FALSE) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
-      fprintf(stderr, "error: set SSL_ENABLE_DEFLATE to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      if (*error_p) free(*error_p);
+      if (asprintf(error_p, "error: set SSL_ENABLE_DEFLATE to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
       return NULL;
     }
 
     newfd = SSL_ImportFD(model, nspr);
     if (newfd == NULL) {
       const PRErrorCode err = PR_GetError();
-      fprintf(stderr, "error: SSL_ImportFD error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      if (*error_p) free(*error_p);
+      if (asprintf(error_p, "error: SSL_ImportFD error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
       return NULL;
     }
     nspr = newfd;
@@ -391,17 +396,20 @@ nspr_tls_handshake(const int sockfd, const char *host) {
 
   if (SSL_ResetHandshake(nspr, PR_FALSE) != SECSuccess) {
     const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: SSL_ResetHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+    if (*error_p) free(*error_p);
+    if (asprintf(error_p, "error: SSL_ResetHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
     return NULL;
   }
   if (SSL_SetURL(nspr, host) != SECSuccess) {
     const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: SSL_SetURL error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+    if (*error_p) free(*error_p);
+    if (asprintf(error_p, "error: SSL_SetURL error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
     return NULL;
   }
   if (SSL_ForceHandshake(nspr) != SECSuccess) {
     const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: SSL_ForceHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+    if (*error_p) free(*error_p);
+    if (asprintf(error_p, "error: SSL_ForceHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) abort();
     return NULL;
   }
 
@@ -414,11 +422,21 @@ nspr_tls_connect(const char *host, const char *port) {
   happy_eyeballs_lookup(&state, host, port);
 
   PRFileDesc* nsprconn = NULL;
+  char *last_tls_error = NULL;
   do {
     int sockfd = happy_eyeballs_connect(state);
-    if (sockfd < 0) abort();
-    else if (sockfd > 0)
-      nsprconn = nspr_tls_handshake(sockfd, host);
+    if (sockfd == 0)
+      continue;
+    if (sockfd < 0) {
+      if (last_tls_error != NULL) {
+	fprintf(stderr, last_tls_error);
+	free(last_tls_error);
+      } else {
+	fprintf(stderr, "error: No TCP connection could be established.");
+      }
+      abort();
+    }
+    nsprconn = nspr_tls_handshake(sockfd, host, &last_tls_error);
   } while (nsprconn == NULL);
 
   // We have a TLS connection now, disconnect all other connections.
