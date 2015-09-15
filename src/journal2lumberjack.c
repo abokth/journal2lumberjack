@@ -494,6 +494,64 @@ happy_eyeballs_connect(struct happy_eyeballs *state) {
   return -1;
 }
 
+// Initialize NSS library.
+//  https://docs.fedoraproject.org/en-US/Fedora_Security_Team/1/html/Defensive_Coding/sect-Defensive_Coding-TLS-Client-NSS.html
+void
+nspr_tls_init(const char *certdb) {
+
+  PR_Init(PR_USER_THREAD, PR_PRIORITY_NORMAL, 0);
+  NSSInitContext *const ctx = NSS_InitContext(certdb, "", "", "", NULL, NSS_INIT_READONLY | NSS_INIT_PK11RELOAD);
+
+  if (ctx == NULL) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
+    abort();
+  }
+
+  // Ciphers to enable.
+  static const PRUint16 good_ciphers[] = {
+    TLS_RSA_WITH_AES_128_CBC_SHA,
+    TLS_RSA_WITH_AES_256_CBC_SHA,
+    SSL_RSA_WITH_3DES_EDE_CBC_SHA,
+    SSL_NULL_WITH_NULL_NULL // sentinel
+  };
+
+  // Check if the current policy allows any strong ciphers.  If it
+  // doesn't, set the cipher suite policy.  This is not thread-safe
+  // and has global impact.  Consequently, we only do it if absolutely
+  // necessary.
+  int found_good_cipher = 0;
+  for (const PRUint16 *p = good_ciphers; *p != SSL_NULL_WITH_NULL_NULL; ++p) {
+    PRInt32 policy;
+    if (SSL_CipherPolicyGet(*p, &policy) != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: policy for cipher %u: error %d: %s\n", (unsigned)*p, err, PR_ErrorToName(err));
+      abort();
+    }
+    if (policy == SSL_ALLOWED) {
+      //fprintf(stderr, "info: found cipher %x\n", (unsigned)*p);
+      found_good_cipher = 1;
+      break;
+    }
+  }
+  if (!found_good_cipher) {
+    if (NSS_SetDomesticPolicy() != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: NSS_SetDomesticPolicy: error %d: %s\n", err, PR_ErrorToName(err));
+      abort();
+    }
+  }
+
+  // Initialize the trusted certificate store.
+  char module_name[] = "library=libnssckbi.so name=\"Root Certs\"";
+  SECMODModule *module = SECMOD_LoadUserModule(module_name, NULL, PR_FALSE);
+  if (module == NULL || !module->loaded) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
+    abort();
+  }
+}
+
 void
 happy_eyeballs_close(struct happy_eyeballs *state) {
   for (int i=0; i<state->num_addr; i++) {
@@ -504,6 +562,83 @@ happy_eyeballs_close(struct happy_eyeballs *state) {
   free(state->sockets);
   freeaddrinfo(state->server_addresses);
   free(state);
+}
+
+PRFileDesc*
+nspr_tls_handshake(const int sockfd, const char *host) {
+  PRFileDesc* nspr = PR_ImportTCPSocket(sockfd);
+
+  {
+    PRFileDesc *model = PR_NewTCPSocket();
+    PRFileDesc *newfd = SSL_ImportFD(NULL, model);
+    if (newfd == NULL) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: NSPR error code %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      return NULL;
+    }
+    model = newfd;
+    newfd = NULL;
+    if (SSL_OptionSet(model, SSL_ENABLE_SSL2, PR_FALSE) != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: set SSL_ENABLE_SSL2 to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      return NULL;
+    }
+    if (SSL_OptionSet(model, SSL_V2_COMPATIBLE_HELLO, PR_FALSE) != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: set SSL_V2_COMPATIBLE_HELLO to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      return NULL;
+    }
+    if (SSL_OptionSet(model, SSL_ENABLE_DEFLATE, PR_FALSE) != SECSuccess) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: set SSL_ENABLE_DEFLATE to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      return NULL;
+    }
+
+    newfd = SSL_ImportFD(model, nspr);
+    if (newfd == NULL) {
+      const PRErrorCode err = PR_GetError();
+      fprintf(stderr, "error: SSL_ImportFD error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+      return NULL;
+    }
+    nspr = newfd;
+    PR_Close(model);
+  }
+
+  if (SSL_ResetHandshake(nspr, PR_FALSE) != SECSuccess) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: SSL_ResetHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+    return NULL;
+  }
+  if (SSL_SetURL(nspr, host) != SECSuccess) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: SSL_SetURL error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+    return NULL;
+  }
+  if (SSL_ForceHandshake(nspr) != SECSuccess) {
+    const PRErrorCode err = PR_GetError();
+    fprintf(stderr, "error: SSL_ForceHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
+    return NULL;
+  }
+
+  return nspr;
+}
+
+PRFileDesc*
+nspr_tls_connect(const char *host, const char *port) {
+  struct happy_eyeballs *state = NULL;
+  happy_eyeballs_lookup(&state, host, port);
+
+  PRFileDesc* nsprconn = NULL;
+  do {
+    int sockfd = happy_eyeballs_connect(state);
+    if (sockfd < 0) abort();
+    else if (sockfd > 0)
+      nsprconn = nspr_tls_handshake(sockfd, host);
+  } while (nsprconn == NULL);
+
+  // We have a TLS connection now, disconnect all other connections.
+  happy_eyeballs_close(state);
+  return nsprconn;
 }
 
 int
@@ -592,131 +727,9 @@ main(int argc, char **argv)
     exit(0);
   }
 
-  // Initialize NSS library.
-  //  https://docs.fedoraproject.org/en-US/Fedora_Security_Team/1/html/Defensive_Coding/sect-Defensive_Coding-TLS-Client-NSS.html
+  nspr_tls_init(certdb);
 
-  PR_Init(PR_USER_THREAD, PR_PRIORITY_NORMAL, 0);
-  NSSInitContext *const ctx = NSS_InitContext(certdb, "", "", "", NULL, NSS_INIT_READONLY | NSS_INIT_PK11RELOAD);
-
-  if (ctx == NULL) {
-    const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
-    abort();
-  }
-
-  // Ciphers to enable.
-  static const PRUint16 good_ciphers[] = {
-    TLS_RSA_WITH_AES_128_CBC_SHA,
-    TLS_RSA_WITH_AES_256_CBC_SHA,
-    SSL_RSA_WITH_3DES_EDE_CBC_SHA,
-    SSL_NULL_WITH_NULL_NULL // sentinel
-  };
-
-  // Check if the current policy allows any strong ciphers.  If it
-  // doesn't, set the cipher suite policy.  This is not thread-safe
-  // and has global impact.  Consequently, we only do it if absolutely
-  // necessary.
-  int found_good_cipher = 0;
-  for (const PRUint16 *p = good_ciphers; *p != SSL_NULL_WITH_NULL_NULL; ++p) {
-    PRInt32 policy;
-    if (SSL_CipherPolicyGet(*p, &policy) != SECSuccess) {
-      const PRErrorCode err = PR_GetError();
-      fprintf(stderr, "error: policy for cipher %u: error %d: %s\n", (unsigned)*p, err, PR_ErrorToName(err));
-      abort();
-    }
-    if (policy == SSL_ALLOWED) {
-      //fprintf(stderr, "info: found cipher %x\n", (unsigned)*p);
-      found_good_cipher = 1;
-      break;
-    }
-  }
-  if (!found_good_cipher) {
-    if (NSS_SetDomesticPolicy() != SECSuccess) {
-      const PRErrorCode err = PR_GetError();
-      fprintf(stderr, "error: NSS_SetDomesticPolicy: error %d: %s\n", err, PR_ErrorToName(err));
-      abort();
-    }
-  }
-
-  // Initialize the trusted certificate store.
-  char module_name[] = "library=libnssckbi.so name=\"Root Certs\"";
-  SECMODModule *module = SECMOD_LoadUserModule(module_name, NULL, PR_FALSE);
-  if (module == NULL || !module->loaded) {
-    const PRErrorCode err = PR_GetError();
-    fprintf(stderr, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err));
-    abort();
-  }
-
-  struct happy_eyeballs *state = NULL;
-  happy_eyeballs_lookup(&state, host, port);
-
-  PRFileDesc* nsprconn = NULL;
-  do {
-    int sockfd = happy_eyeballs_connect(state);
-    if (sockfd < 0) abort();
-
-    if (sockfd > 0) {
-      PRFileDesc* nspr = PR_ImportTCPSocket(sockfd);
-      sockfd = -1;
-
-      {
-	PRFileDesc *model = PR_NewTCPSocket();
-	PRFileDesc *newfd = SSL_ImportFD(NULL, model);
-	if (newfd == NULL) {
-	  const PRErrorCode err = PR_GetError();
-	  fprintf(stderr, "error: NSPR error code %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
-	  continue;
-	}
-	model = newfd;
-	newfd = NULL;
-	if (SSL_OptionSet(model, SSL_ENABLE_SSL2, PR_FALSE) != SECSuccess) {
-	  const PRErrorCode err = PR_GetError();
-	  fprintf(stderr, "error: set SSL_ENABLE_SSL2 to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
-	  continue;
-	}
-	if (SSL_OptionSet(model, SSL_V2_COMPATIBLE_HELLO, PR_FALSE) != SECSuccess) {
-	  const PRErrorCode err = PR_GetError();
-	  fprintf(stderr, "error: set SSL_V2_COMPATIBLE_HELLO to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
-	  continue;
-	}
-	if (SSL_OptionSet(model, SSL_ENABLE_DEFLATE, PR_FALSE) != SECSuccess) {
-	  const PRErrorCode err = PR_GetError();
-	  fprintf(stderr, "error: set SSL_ENABLE_DEFLATE to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
-	  continue;
-	}
-
-	newfd = SSL_ImportFD(model, nspr);
-	if (newfd == NULL) {
-	  const PRErrorCode err = PR_GetError();
-	  fprintf(stderr, "error: SSL_ImportFD error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
-	  continue;
-	}
-	nspr = newfd;
-	PR_Close(model);
-      }
-
-      if (SSL_ResetHandshake(nspr, PR_FALSE) != SECSuccess) {
-	const PRErrorCode err = PR_GetError();
-	fprintf(stderr, "error: SSL_ResetHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
-	continue;
-      }
-      if (SSL_SetURL(nspr, host) != SECSuccess) {
-	const PRErrorCode err = PR_GetError();
-	fprintf(stderr, "error: SSL_SetURL error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
-	continue;
-      }
-      if (SSL_ForceHandshake(nspr) != SECSuccess) {
-	const PRErrorCode err = PR_GetError();
-	fprintf(stderr, "error: SSL_ForceHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err));
-	continue;
-      }
-
-      nsprconn = nspr;
-    }
-  } while (nsprconn == NULL);
-
-  // We have a TLS connection now, disconnect all other connections.
-  happy_eyeballs_close(state);
+  PRFileDesc* nsprconn = nspr_tls_connect(host, port);
 
   struct iobuf iobuf;
   iobuf.nsprconn = nsprconn;
