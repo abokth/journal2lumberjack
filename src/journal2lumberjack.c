@@ -908,6 +908,37 @@ send_journal_through_lumberjack(sd_journal *journal, struct iobuf *iobuf_p, int 
   }
 }
 
+void
+open_and_stream_journal(char *host, char *port, int stateless) {
+  int persistent = watch_journal_paths();
+
+  sd_journal *journal;
+  int res = sd_journal_open(&journal, 0);
+  if (res) {
+    abort();
+  }
+
+  char *acked_cursor = NULL;
+
+  // The runtime file, if it exists, should be at least as up to date as the persistent file.
+  acked_cursor = load_cursor(RUNTIME_CURSOR_FILE);
+  if (!acked_cursor)
+    acked_cursor = load_cursor(PERSISTENT_CURSOR_FILE);
+
+  if (acked_cursor)
+    sd_journal_seek_cursor(journal, acked_cursor);
+
+  struct iobuf *iobuf_p = iobuf_connect_tls(host, port);
+
+  send_journal_through_lumberjack(journal, iobuf_p, persistent, stateless, acked_cursor);
+
+  // this will never be reached
+
+  iobuf_close(iobuf_p);
+
+  sd_journal_close(journal);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -999,33 +1030,7 @@ main(int argc, char **argv)
   if (inotifytools_initialize() == 0)
     fprintf(stderr, "%s\n", strerror( inotifytools_error()));
 
-  int persistent = watch_journal_paths();
-
-  sd_journal *journal;
-  int res = sd_journal_open(&journal, 0);
-  if (res) {
-    abort();
-  }
-
-  char *acked_cursor = NULL;
-
-  // The runtime file, if it exists, should be at least as up to date as the persistent file.
-  acked_cursor = load_cursor(RUNTIME_CURSOR_FILE);
-  if (!acked_cursor)
-    acked_cursor = load_cursor(PERSISTENT_CURSOR_FILE);
-
-  if (acked_cursor)
-    sd_journal_seek_cursor(journal, acked_cursor);
-
-  struct iobuf *iobuf_p = iobuf_connect_tls(host, port);
-
-  send_journal_through_lumberjack(journal, iobuf_p, persistent, stateless, acked_cursor);
-
-  // this will never be reached
-
-  iobuf_close(iobuf_p);
-
-  sd_journal_close(journal);
+  open_and_stream_journal(host, port, stateless);
   exit(0);
 }
 
