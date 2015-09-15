@@ -293,6 +293,20 @@ flush_lumberjack_data(struct iobuf *iobuf_p, int force) {
 #define RUNTIME_CURSOR_FILE "/run/journal-export-acked-cursor"
 #define PERSISTENT_CURSOR_FILE "/var/lib/journal-export-acked-cursor"
 
+char *
+load_cursor(const char *filename) {
+  FILE *statefile = fopen(filename, "r");
+  if (!statefile)
+    return NULL;
+  if (statefile) {
+    char readbuf[1024];
+    readbuf[1023] = '\0';
+    if (fgets(readbuf, 1023, statefile) != NULL)
+      acked_cursor = strdup(readbuf);
+    fclose(statefile);
+  }
+}
+
 void
 save_cursor(const char *filename, const char *acked_cursor) {
   FILE *statefile = fopen(filename, "w");
@@ -746,18 +760,12 @@ main(int argc, char **argv)
   char *acked_cursor = NULL;
 
   // The runtime file, if it exists, should be at least as up to date as the persistent file.
-  FILE *statefile = fopen(RUNTIME_CURSOR_FILE, "r");
-  if (!statefile)
-    statefile = fopen(PERSISTENT_CURSOR_FILE, "r");
-  if (statefile) {
-    char readbuf[1024];
-    readbuf[1023] = '\0';
-    if (fgets(readbuf, 1023, statefile) != NULL)
-      acked_cursor = strdup(readbuf);
-    fclose(statefile);
-  }
+  acked_cursor = load_cursor(RUNTIME_CURSOR_FILE);
+  if (!acked_cursor)
+    acked_cursor = load_cursor(PERSISTENT_CURSOR_FILE);
 
-  sd_journal_seek_cursor(journal, acked_cursor);
+  if (acked_cursor)
+    sd_journal_seek_cursor(journal, acked_cursor);
 
   struct iobuf iobuf;
   iobuf.inbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
