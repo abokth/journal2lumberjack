@@ -719,6 +719,11 @@ start_lumberjack_data_frame(struct iobuf *iobuf_p, uint32_t sequence_number) {
 }
 
 void
+start_lumberjack_data_inc_field_count(struct iobuf *iobuf_p) {
+  iobuf_p->outbuf_data_field_count++;
+}
+
+void
 end_lumberjack_data_frame(struct iobuf *iobuf_p) {
   // replace the dummy value with the proper one before sending
   write_network_long_to_iobuf_at(iobuf_p, iobuf_p->outbuf_data_field_count, iobuf_p->outbuf_data_field_count_pos);
@@ -869,7 +874,7 @@ main(int argc, char **argv)
       start_lumberjack_data_frame(iobuf_p, ++sent_sequence_number);
 
       // send key + value
-      iobuf_p->outbuf_data_field_count++;
+      start_lumberjack_data_inc_field_count(iobuf_p);
       write_lumberjack_string(iobuf_p, "type");
       write_lumberjack_string(iobuf_p, "journal");
 
@@ -887,7 +892,7 @@ main(int argc, char **argv)
       }
 
       // send key
-      iobuf_p->outbuf_data_field_count++;
+      start_lumberjack_data_inc_field_count(iobuf_p);
       write_lumberjack_string(iobuf_p, "timestamp");
 
       // send value
@@ -896,7 +901,7 @@ main(int argc, char **argv)
       // __REALTIME_TIMESTAMP -> journal_realtime_timestamp
 
       // send key + value
-      iobuf_p->outbuf_data_field_count++;
+      start_lumberjack_data_inc_field_count(iobuf_p);
       write_lumberjack_string(iobuf_p, "journal_realtime_timestamp");
       char journal_realtime_timestamp_msec[DATE_BUFFER_SIZE];
       journal_realtime_timestamp_msec[DATE_BUFFER_SIZE-1] = '\0';
@@ -918,7 +923,7 @@ main(int argc, char **argv)
 
 	if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
 	  // send key
-	  iobuf_p->outbuf_data_field_count++;
+	  start_lumberjack_data_inc_field_count(iobuf_p);
 	  write_lumberjack_string(iobuf_p, "source_timestamp");
 	  // send value
 	  uint64_t source_timestamp_usec = (uint64_t)atoll(value);
@@ -933,7 +938,7 @@ main(int argc, char **argv)
 	// (.*) -> \1
 
 	// send key
-	iobuf_p->outbuf_data_field_count++;
+	start_lumberjack_data_inc_field_count(iobuf_p);
 	if (strncmp(keyvalue, "MESSAGE=", 8) == 0) {
 	  write_lumberjack_string(iobuf_p, "line");
 	} else if (strncmp(keyvalue, "_HOSTNAME=", 10) == 0) {
