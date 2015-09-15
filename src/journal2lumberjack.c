@@ -474,10 +474,6 @@ new_iobuf(PRFileDesc* nsprconn) {
   iobuf_p->outbuf = calloc(STREAM_BUFFER_SIZE, sizeof(uint8_t));
   iobuf_p->inbuf_size = STREAM_BUFFER_SIZE;
   iobuf_p->outbuf_size = STREAM_BUFFER_SIZE;
-  iobuf_p->inbuf_start = 0;
-  iobuf_p->inbuf_consumed = 0;
-  iobuf_p->outbuf_consumed = 0;
-  iobuf_p->outbuf_data_queue = 0;
   iobuf_p->nsprconn = nsprconn;
   return iobuf_p;
 }
