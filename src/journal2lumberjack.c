@@ -1031,6 +1031,7 @@ main(int argc, char **argv)
     fprintf(stderr, "%s\n", strerror( inotifytools_error()));
 
   open_and_stream_journal(host, port, stateless);
+
   exit(0);
 }
 
