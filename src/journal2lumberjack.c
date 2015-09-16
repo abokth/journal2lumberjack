@@ -462,7 +462,7 @@ struct iobuf {
   size_t inbuf_start; // first used byte
   size_t inbuf_consumed, outbuf_consumed; // first free byte
   size_t inbuf_size, outbuf_size;
-  size_t outbuf_data_field_count_pos;
+  size_t outbuf_data_field_count_pos, outbuf_string_length_pos;
   int outbuf_data_queue;
 };
 
@@ -657,10 +657,27 @@ read_lumberjack_ack(struct iobuf *iobuf_p) {
 }
 
 void
+begin_lumberjack_string(struct iobuf *iobuf_p) {
+  // record where the string length value is
+  iobuf_p->outbuf_string_length_pos = iobuf_p->outbuf_consumed;
+
+  // and init the length
+  write_network_long_to_iobuf(iobuf_p, 0);
+}
+
+void
+extend_lumberjack_string(struct iobuf *iobuf_p, const char *string, size_t length) {
+  if (length > UINT32_MAX) abort();
+  // update the length
+  add_network_long_to_iobuf_at(iobuf_p, length, iobuf_p->outbuf_string_length_pos);
+  // extend the string
+  write_buf_to_iobuf(iobuf_p, (const uint8_t *)string, length);
+}
+
+void
 write_lumberjack_string(struct iobuf *iobuf_p, const char *string) {
-  size_t l = strlen(string);
-  write_network_long_to_iobuf(iobuf_p, l);
-  write_buf_to_iobuf(iobuf_p, (const uint8_t *)string, l);
+  begin_lumberjack_string(iobuf_p);
+  extend_lumberjack_string(iobuf_p, string, strlen(string));
 }
 
 void
@@ -683,10 +700,10 @@ write_rfc3339_date_to_iobuf(struct iobuf *iobuf_p, uint64_t realtime_timestamp_u
 
   //fprintf(stderr, "%s%sZ\n", realtime_timestamp_rfc3339_a, realtime_timestamp_rfc3339_b);
 
-  write_network_long_to_iobuf(iobuf_p, realtime_timestamp_rfc3339_a_len + realtime_timestamp_rfc3339_b_len + 1);
-  write_buf_to_iobuf(iobuf_p, (uint8_t *)realtime_timestamp_rfc3339_a, realtime_timestamp_rfc3339_a_len);
-  write_buf_to_iobuf(iobuf_p, (uint8_t *)realtime_timestamp_rfc3339_b, realtime_timestamp_rfc3339_b_len);
-  write_buf_to_iobuf(iobuf_p, (uint8_t *)"Z", 1);
+  begin_lumberjack_string(iobuf_p);
+  extend_lumberjack_string(iobuf_p, realtime_timestamp_rfc3339_a, realtime_timestamp_rfc3339_a_len);
+  extend_lumberjack_string(iobuf_p, realtime_timestamp_rfc3339_b, realtime_timestamp_rfc3339_b_len);
+  extend_lumberjack_string(iobuf_p, "Z", 1);
 }
 
 void
@@ -767,26 +784,24 @@ send_journal_entry_field_through_lumberjack(struct iobuf *iobuf_p, const void *d
   } else if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
     write_lumberjack_string(iobuf_p, "source_realtime_timestamp");
   } else if (strncmp(keyvalue, "_", 1) == 0) {
+    begin_lumberjack_string(iobuf_p);
     if (strncmp(keyvalue, "__", 2) == 0) {
       // __FOO -> journal_foo
-      write_network_long_to_iobuf(iobuf_p, key_length - 1 + 7);
-      write_buf_to_iobuf(iobuf_p, (uint8_t *)"journal", 7);
-    } else {
-      // _FOO -> foo
-      write_network_long_to_iobuf(iobuf_p, key_length - 1);
+      extend_lumberjack_string(iobuf_p, "journal", 7);
     }
+    // skip the first character ('_'), lowercase the rest
     for (size_t i=1; i<key_length; i++) {
-      uint8_t lowercase = (uint8_t)tolower(keyvalue[i]);
-      write_buf_to_iobuf(iobuf_p, &lowercase, 1);
+      char lowercase = tolower(keyvalue[i]);
+      extend_lumberjack_string(iobuf_p, &lowercase, 1);
     }
   } else {
-    write_network_long_to_iobuf(iobuf_p, key_length);
-    write_buf_to_iobuf(iobuf_p, (uint8_t *)keyvalue, key_length);
+    begin_lumberjack_string(iobuf_p);
+    extend_lumberjack_string(iobuf_p, keyvalue, key_length);
   }
 
   // send value
-  write_network_long_to_iobuf(iobuf_p, value_length);
-  write_buf_to_iobuf(iobuf_p, (uint8_t *)value, value_length);
+  begin_lumberjack_string(iobuf_p);
+  extend_lumberjack_string(iobuf_p, value, value_length);
 }
 
 void
