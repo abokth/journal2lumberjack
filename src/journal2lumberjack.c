@@ -362,7 +362,7 @@ nspr_tls_handshake(const int sockfd, const char *host, char **error_p) {
     if (newfd == NULL) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: NSPR error code %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
+      if (asprintf(error_p, "error: NSPR error code %d: %s\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
     model = newfd;
@@ -370,19 +370,19 @@ nspr_tls_handshake(const int sockfd, const char *host, char **error_p) {
     if (SSL_OptionSet(model, SSL_ENABLE_SSL2, PR_FALSE) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: set SSL_ENABLE_SSL2 to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
+      if (asprintf(error_p, "error: set SSL_ENABLE_SSL2 to false error %d: %s\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
     if (SSL_OptionSet(model, SSL_V2_COMPATIBLE_HELLO, PR_FALSE) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: set SSL_V2_COMPATIBLE_HELLO to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
+      if (asprintf(error_p, "error: set SSL_V2_COMPATIBLE_HELLO to false error %d: %s\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
     if (SSL_OptionSet(model, SSL_ENABLE_DEFLATE, PR_FALSE) != SECSuccess) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: set SSL_ENABLE_DEFLATE to false error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
+      if (asprintf(error_p, "error: set SSL_ENABLE_DEFLATE to false error %d: %s\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
 
@@ -390,7 +390,7 @@ nspr_tls_handshake(const int sockfd, const char *host, char **error_p) {
     if (newfd == NULL) {
       const PRErrorCode err = PR_GetError();
       if (*error_p) free(*error_p);
-      if (asprintf(error_p, "error: SSL_ImportFD error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
+      if (asprintf(error_p, "error: SSL_ImportFD error %d: %s\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
       return NULL;
     }
     nspr = newfd;
@@ -400,19 +400,19 @@ nspr_tls_handshake(const int sockfd, const char *host, char **error_p) {
   if (SSL_ResetHandshake(nspr, PR_FALSE) != SECSuccess) {
     const PRErrorCode err = PR_GetError();
     if (*error_p) free(*error_p);
-    if (asprintf(error_p, "error: SSL_ResetHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
+    if (asprintf(error_p, "error: SSL_ResetHandshake error %d: %s\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
     return NULL;
   }
   if (SSL_SetURL(nspr, host) != SECSuccess) {
     const PRErrorCode err = PR_GetError();
     if (*error_p) free(*error_p);
-    if (asprintf(error_p, "error: SSL_SetURL error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
+    if (asprintf(error_p, "error: SSL_SetURL error %d: %s\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
     return NULL;
   }
   if (SSL_ForceHandshake(nspr) != SECSuccess) {
     const PRErrorCode err = PR_GetError();
     if (*error_p) free(*error_p);
-    if (asprintf(error_p, "error: SSL_ForceHandshake error %d: %s (retrying remaining addresses)\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
+    if (asprintf(error_p, "error: SSL_ForceHandshake error %d: %s\n", err, PR_ErrorToName(err)) == -1) errx("Allocation failure.");
     return NULL;
   }
 
