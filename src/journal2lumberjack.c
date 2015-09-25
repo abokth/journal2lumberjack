@@ -675,6 +675,18 @@ extend_lumberjack_string(struct iobuf *iobuf_p, const char *string, size_t lengt
 }
 
 void
+extend_lumberjack_string_tolower(struct iobuf *iobuf_p, const char *string, size_t length) {
+  if (length > UINT32_MAX) abort();
+  // update the length
+  add_network_long_to_iobuf_at(iobuf_p, length, iobuf_p->outbuf_string_length_pos);
+  // extend the string
+  for (size_t i=0; i<length; i++) {
+    uint8_t lowercase = (uint8_t)tolower(string[i]);
+    write_buf_to_iobuf(iobuf_p, &lowercase, 1);
+  }
+}
+
+void
 write_lumberjack_string(struct iobuf *iobuf_p, const char *string) {
   begin_lumberjack_string(iobuf_p);
   extend_lumberjack_string(iobuf_p, string, strlen(string));
@@ -757,19 +769,36 @@ send_journal_entry_field_through_lumberjack(struct iobuf *iobuf_p, const void *d
     write_unix_ms_date_to_iobuf(iobuf_p, source_timestamp_usec);
   }
 
+  // _HOSTNAME -> shorten and lowercase value -> host
+
+  static char *short_host_chars = "0123456789-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  static char *first_host_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+  if (value_length > 0 && strncmp(keyvalue, "_HOSTNAME=", 10) == 0 && strchr(first_host_chars, value[0]) != NULL) {
+    size_t short_host_length = 1;
+    while (short_host_length < value_length && strchr(short_host_chars, value[short_host_length]) != NULL)
+      short_host_length++;
+
+    if (short_host_length == value_length || value[short_host_length] == '.') {
+      // send key
+      lumberjack_data_inc_field_count(iobuf_p);
+      write_lumberjack_string(iobuf_p, "host");
+      // send value
+      begin_lumberjack_string(iobuf_p);
+      extend_lumberjack_string_tolower(iobuf_p, value, short_host_length);
+    }
+  }
+
   // MESSAGE -> line
-  // _HOSTNAME -> host
   // _SOURCE_REALTIME_TIMESTAMP -> source_realtime_timestamp
-  // __(.*) -> lowercase -> journal_\1
-  // _(.*) -> lowercase -> \1
+  // __(.*) -> lowercase key -> journal_\1
+  // _(.*) -> lowercase key -> \1
   // (.*) -> \1
 
   // send key
   lumberjack_data_inc_field_count(iobuf_p);
   if (strncmp(keyvalue, "MESSAGE=", 8) == 0) {
     write_lumberjack_string(iobuf_p, "line");
-  } else if (strncmp(keyvalue, "_HOSTNAME=", 10) == 0) {
-    write_lumberjack_string(iobuf_p, "host");
   } else if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
     write_lumberjack_string(iobuf_p, "source_realtime_timestamp");
   } else if (strncmp(keyvalue, "_", 1) == 0) {
@@ -779,10 +808,7 @@ send_journal_entry_field_through_lumberjack(struct iobuf *iobuf_p, const void *d
       extend_lumberjack_string(iobuf_p, "journal", 7);
     }
     // skip the first character ('_'), lowercase the rest
-    for (size_t i=1; i<key_length; i++) {
-      char lowercase = tolower(keyvalue[i]);
-      extend_lumberjack_string(iobuf_p, &lowercase, 1);
-    }
+    extend_lumberjack_string_tolower(iobuf_p, &(keyvalue[1]), key_length - 1);
   } else {
     begin_lumberjack_string(iobuf_p);
     extend_lumberjack_string(iobuf_p, keyvalue, key_length);
