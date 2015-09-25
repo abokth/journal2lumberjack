@@ -453,7 +453,7 @@ nspr_tls_close(PRFileDesc* nsprconn) {
 }
 
 #define STREAM_BUFFER_SIZE 1048576
-#define DATE_BUFFER_SIZE 100
+#define STRING_BUFFER_SIZE 100
 
 struct iobuf {
   PRFileDesc* nsprconn;
@@ -681,29 +681,18 @@ write_lumberjack_string(struct iobuf *iobuf_p, const char *string) {
 }
 
 void
-write_rfc3339_date_to_iobuf(struct iobuf *iobuf_p, uint64_t realtime_timestamp_usec) {
-  char realtime_timestamp_rfc3339_a[DATE_BUFFER_SIZE];
-  realtime_timestamp_rfc3339_a[DATE_BUFFER_SIZE-1] = '\0';
-  char realtime_timestamp_rfc3339_b[DATE_BUFFER_SIZE];
-  realtime_timestamp_rfc3339_b[DATE_BUFFER_SIZE-1] = '\0';
+write_int_as_string_to_iobuf(struct iobuf *iobuf_p, uint64_t value) {
+  char unix_ms_str[STRING_BUFFER_SIZE];
+  unix_ms_str[STRING_BUFFER_SIZE-1] = '\0';
 
-  time_t realtime_timestamp_time_t = realtime_timestamp_usec / 1000000;
+  snprintf(unix_ms_str, STRING_BUFFER_SIZE-1, "%llu", (unsigned long long)value);
 
-  struct tm realtime_timestamp_tm;
-  gmtime_r(&realtime_timestamp_time_t, &realtime_timestamp_tm);
+  write_lumberjack_string(iobuf_p, unix_ms_str);
+}
 
-  strftime(realtime_timestamp_rfc3339_a, DATE_BUFFER_SIZE-1, "%FT%T", &realtime_timestamp_tm);
-  snprintf(realtime_timestamp_rfc3339_b, DATE_BUFFER_SIZE-1, ".%03u", (int)(realtime_timestamp_usec % 1000000) / 1000);
-
-  size_t realtime_timestamp_rfc3339_a_len = strlen(realtime_timestamp_rfc3339_a);
-  size_t realtime_timestamp_rfc3339_b_len = strlen(realtime_timestamp_rfc3339_b);
-
-  //fprintf(stderr, "%s%sZ\n", realtime_timestamp_rfc3339_a, realtime_timestamp_rfc3339_b);
-
-  begin_lumberjack_string(iobuf_p);
-  extend_lumberjack_string(iobuf_p, realtime_timestamp_rfc3339_a, realtime_timestamp_rfc3339_a_len);
-  extend_lumberjack_string(iobuf_p, realtime_timestamp_rfc3339_b, realtime_timestamp_rfc3339_b_len);
-  extend_lumberjack_string(iobuf_p, "Z", 1);
+void
+write_unix_ms_date_to_iobuf(struct iobuf *iobuf_p, uint64_t timestamp_usec) {
+  write_int_as_string_to_iobuf(iobuf_p, (uint64_t)(timestamp_usec / 1000));
 }
 
 void
@@ -757,7 +746,7 @@ send_journal_entry_field_through_lumberjack(struct iobuf *iobuf_p, const void *d
   const char *value = &(separator[1]);
   size_t value_length = length - key_length - 1;
 
-  // _SOURCE_REALTIME_TIMESTAMP -> rfc -> source_timestamp
+  // _SOURCE_REALTIME_TIMESTAMP -> milliseconds -> source_timestamp
 
   if (strncmp(keyvalue, "_SOURCE_REALTIME_TIMESTAMP=", 27) == 0) {
     // send key
@@ -765,7 +754,7 @@ send_journal_entry_field_through_lumberjack(struct iobuf *iobuf_p, const void *d
     write_lumberjack_string(iobuf_p, "source_timestamp");
     // send value
     uint64_t source_timestamp_usec = (uint64_t)atoll(value);
-    write_rfc3339_date_to_iobuf(iobuf_p, source_timestamp_usec);
+    write_unix_ms_date_to_iobuf(iobuf_p, source_timestamp_usec);
   }
 
   // MESSAGE -> line
@@ -813,24 +802,15 @@ send_journal_entry_through_lumberjack(sd_journal *journal, uint64_t journal_real
   write_lumberjack_string(iobuf_p, "type");
   write_lumberjack_string(iobuf_p, "journal");
 
-  // __REALTIME_TIMESTAMP -> rfc -> timestamp
-
-  // send key
+  // __REALTIME_TIMESTAMP -> milliseconds -> timestamp
   lumberjack_data_inc_field_count(iobuf_p);
   write_lumberjack_string(iobuf_p, "timestamp");
-
-  // send value
-  write_rfc3339_date_to_iobuf(iobuf_p, journal_realtime_timestamp_usec);
+  write_unix_ms_date_to_iobuf(iobuf_p, journal_realtime_timestamp_usec);
 
   // __REALTIME_TIMESTAMP -> journal_realtime_timestamp
-
-  // send key + value
   lumberjack_data_inc_field_count(iobuf_p);
   write_lumberjack_string(iobuf_p, "journal_realtime_timestamp");
-  char journal_realtime_timestamp_msec[DATE_BUFFER_SIZE];
-  journal_realtime_timestamp_msec[DATE_BUFFER_SIZE-1] = '\0';
-  snprintf(journal_realtime_timestamp_msec, DATE_BUFFER_SIZE-1, "%ld", (long)(journal_realtime_timestamp_usec));
-  write_lumberjack_string(iobuf_p, journal_realtime_timestamp_msec);
+  write_int_as_string_to_iobuf(iobuf_p, journal_realtime_timestamp_usec);
 
   const void *data;
   size_t length;
