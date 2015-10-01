@@ -30,6 +30,7 @@
 #include <systemd/sd-journal.h>
 #include <zlib.h>
 #include <string.h>
+#include <wctype.h>
 #include <ctype.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -453,7 +454,7 @@ nspr_tls_close(PRFileDesc* nsprconn) {
 }
 
 #define STREAM_BUFFER_SIZE 1048576
-#define STRING_BUFFER_SIZE 100
+#define SMALL_BUFFER_SIZE 128
 
 struct iobuf {
   PRFileDesc* nsprconn;
@@ -674,16 +675,73 @@ extend_lumberjack_string(struct iobuf *iobuf_p, const char *string, size_t lengt
   write_buf_to_iobuf(iobuf_p, (const uint8_t *)string, length);
 }
 
+inline void
+extend_buffer(void **buffer, size_t item_size, size_t *size_p, size_t required_size) {
+  if (required_size >= SIZE_MAX / 2)
+    errx("Integer overflow.");
+  size_t new_size = max((size_t)SMALL_BUFFER_SIZE, *size_p);
+  while (new_size < required_size)
+    new_size *= 2;
+  if (new_size == *size_p)
+    return;
+
+  *buffer = realloc(*buffer, item_size * (*size_p));
+  if (*buffer == NULL) errx("Allocation failure.");
+  *size_p = new_size;
+}
+
+// returned buffer is valid and writeable until next call to the
+// function
+inline void
+mbstringbuf_to_wcstringbuf(wchar_t **buffer_p, size_t *buffer_size_p, const char *string, size_t mb_length) {
+  mbtowc(NULL, NULL, 0);
+  size_t mb_index = 0;
+  size_t wc_index = 0;
+  while (mb_index < mb_length) {
+    extend_buffer((void**)buffer_p, sizeof(wchar_t), buffer_size_p, wc_index + 1);
+    int mb_consumed = mbtowc(&((*buffer_p)[wc_index++]), &(string[mb_index]), mb_length - mb_index);
+    if (mb_consumed < 1)
+      errx("Journal string error.");
+    mb_index += mb_consumed;
+  }
+  (*buffer_p)[wc_index++] = 0;
+}
+
+inline void
+buf_towlower(wchar_t *buf) {
+  for(int i=0; buf[i] != 0; i++)
+    buf[i] = towlower(buf[i]);
+}
+  
+inline size_t
+wcstringbuf_to_mbstringbuf(char **buffer_p, size_t *buffer_size_p, wchar_t *wcstring) {
+  size_t required_mbstring_size = wcstombs(NULL, wcstring, 0) + 1;
+  extend_buffer((void**)buffer_p, sizeof(char), buffer_size_p, required_mbstring_size);
+
+  size_t ret = wcstombs(*buffer_p, wcstring, *buffer_size_p);
+  if (ret == ((size_t)-1))
+    errx("Journal string error.");
+
+  return ret;
+}
+
+static char *mbstring_buffer = NULL;
+static size_t mbstring_buffer_size = 0;
+
+void
+extend_lumberjack_wcstring(struct iobuf *iobuf_p, wchar_t *wcstring) {
+  size_t size = wcstringbuf_to_mbstringbuf(&mbstring_buffer, &mbstring_buffer_size, wcstring);
+  extend_lumberjack_string(iobuf_p, mbstring_buffer, size);
+}
+
+static wchar_t *wcstring_buffer = NULL;
+static size_t wcstring_buffer_size = 0;
+
 void
 extend_lumberjack_string_tolower(struct iobuf *iobuf_p, const char *string, size_t length) {
-  if (length > UINT32_MAX) abort();
-  // update the length
-  add_network_long_to_iobuf_at(iobuf_p, length, iobuf_p->outbuf_string_length_pos);
-  // extend the string
-  for (size_t i=0; i<length; i++) {
-    uint8_t lowercase = (uint8_t)tolower(string[i]);
-    write_buf_to_iobuf(iobuf_p, &lowercase, 1);
-  }
+  mbstringbuf_to_wcstringbuf(&wcstring_buffer, &wcstring_buffer_size, string, length);
+  buf_towlower(wcstring_buffer);
+  extend_lumberjack_wcstring(iobuf_p, wcstring_buffer);
 }
 
 void
@@ -694,10 +752,10 @@ write_lumberjack_string(struct iobuf *iobuf_p, const char *string) {
 
 void
 write_int_as_string_to_iobuf(struct iobuf *iobuf_p, uint64_t value) {
-  char unix_ms_str[STRING_BUFFER_SIZE];
-  unix_ms_str[STRING_BUFFER_SIZE-1] = '\0';
+  char unix_ms_str[SMALL_BUFFER_SIZE];
+  unix_ms_str[SMALL_BUFFER_SIZE-1] = '\0';
 
-  snprintf(unix_ms_str, STRING_BUFFER_SIZE-1, "%llu", (unsigned long long)value);
+  snprintf(unix_ms_str, SMALL_BUFFER_SIZE-1, "%llu", (unsigned long long)value);
 
   write_lumberjack_string(iobuf_p, unix_ms_str);
 }
