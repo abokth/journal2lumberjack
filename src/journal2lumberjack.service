@@ -1,14 +1,24 @@
 [Unit]
 Description=Journal Remote Logstash Upload Service
 After=network.target
- 
+
 [Service]
+User=journal2lumberjack
+SupplementaryGroups=systemd-journal
+
 EnvironmentFile=/etc/sysconfig/journal2lumberjack
-Type=simple
-ExecStart=/usr/libexec/journal2lumberjack --host ${DESTINATION_HOST} --cafile ${DESTINATION_CAFILE}
-PrivateTmp=yes
+Type=notify
+ExecStart=/usr/libexec/journal2lumberjack --host $DESTINATION_HOST --port $DESTINATION_PORT --certdb sql:/etc/pki/journal2lumberjack
 LimitNOFILE=16384
 Restart=on-failure
- 
+
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full
+ProtectHome=yes
+NoNewPrivileges=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_NETLINK,AF_LOCAL,AF_INET,AF_INET6
+
 [Install]
 WantedBy=multi-user.target
