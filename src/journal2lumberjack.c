@@ -65,8 +65,8 @@ __attribute__ ((noreturn)) errx(const char *description) {
   exit(3); // will never be reached
 }
 
-#define RUNTIME_CURSOR_FILE "/run/journal-export-acked-cursor"
-#define PERSISTENT_CURSOR_FILE "/var/lib/journal-export-acked-cursor"
+#define RUNTIME_CURSOR_FILE "/run/journal2lumberjack/acked-cursor"
+#define PERSISTENT_CURSOR_FILE "/var/lib/journal2lumberjack/acked-cursor"
 
 char *
 load_cursor(const char *filename) {
