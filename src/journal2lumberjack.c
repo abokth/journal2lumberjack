@@ -36,6 +36,7 @@
 #include <sys/types.h>
 #include <inotifytools/inotifytools.h>
 #include <inotifytools/inotify.h>
+#include <systemd/sd-daemon.h>
 
 // NSS
 #include <prerror.h>
@@ -992,6 +993,8 @@ open_and_stream_journal(char *host, char *port, int stateless) {
     sd_journal_seek_cursor(journal, acked_cursor);
 
   struct iobuf *iobuf_p = iobuf_connect_tls(host, port);
+
+  sd_notify(0, "READY=1");
 
   send_journal_through_lumberjack(journal, iobuf_p, persistent, stateless, acked_cursor);
 
