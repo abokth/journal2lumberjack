@@ -695,7 +695,8 @@ extend_buffer(void **buffer, size_t item_size, size_t *size_p, size_t required_s
 // function
 inline void
 mbstringbuf_to_wcstringbuf(wchar_t **buffer_p, size_t *buffer_size_p, const char *string, size_t mb_length) {
-  mbtowc(NULL, NULL, 0);
+  int stateful_encoding __attribute__((unused));
+  stateful_encoding = mbtowc(NULL, NULL, 0);
   size_t mb_index = 0;
   size_t wc_index = 0;
   while (mb_index < mb_length) {
