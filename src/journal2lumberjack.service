@@ -11,6 +11,8 @@ Type=notify
 ExecStart=/usr/libexec/journal2lumberjack --host $DESTINATION_HOST --port $DESTINATION_PORT --certdb sql:/etc/pki/journal2lumberjack
 LimitNOFILE=16384
 Restart=on-failure
+# This must be greater than DefaultStartLimitInterval/DefaultStartLimitBurst
+RestartSec=45s
 
 PrivateTmp=yes
 PrivateDevices=yes
